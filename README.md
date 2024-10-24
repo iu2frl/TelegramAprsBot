@@ -81,8 +81,8 @@ python main.py
 ## Directory Structure
 
 ```
-aprs-telegram-bot/
-├── bot.py
+TelegramAprsBot/
+├── main.py
 ├── logs/           # Log files directory (created automatically)
 │   └── bot_output.log
 └── db/            # SQLite database directory (created automatically)
@@ -111,6 +111,21 @@ The bot maintains rotating log files in the `logs` directory:
 - Verifies user approval status before operations
 - Handles APRS-IS connection issues
 - Prevents concurrent APRS socket operations
+
+## Running on Docker
+
+An image is built and published at every release with name `iu2frl/telegram-aprs`. The following docker-compose can be used to run it:
+
+```yaml
+services:
+  telegram-aprs:
+    container_name: telegram-aprs
+    image: iu2frl/telegram-aprs
+    environment:
+      - "BOT_TOKEN=000000000:AAAAAAAAAAAAAAAAAAAA"
+      - "BOT_ADMIN=000000000"
+    restart: unless-stopped
+```
 
 ## Contributing
 
