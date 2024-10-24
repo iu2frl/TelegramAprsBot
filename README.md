@@ -122,9 +122,19 @@ services:
     container_name: telegram-aprs
     image: iu2frl/telegram-aprs
     environment:
-      - "BOT_TOKEN=000000000:AAAAAAAAAAAAAAAAAAAA"
-      - "BOT_ADMIN=000000000"
+      - "BOT_TOKEN=00000:AAAAAAAAAAAAAAAA"
+      - "BOT_ADMIN=000000"
+      - "APRS_USER=MY0CALL"
     restart: unless-stopped
+    volumes:
+      - database:/home/frlbot/db
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
+volumes:
+  database:
 ```
 
 ## Contributing

@@ -509,7 +509,7 @@ def start_telegram_polling() -> None:
 # Send message to administrator
 async def send_to_admin(message: str) -> None:
     global telegram_app
-    await telegram_bot.sendMessage(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
+    await telegram_app.sendMessage(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
