@@ -30,6 +30,9 @@ aprs_socket: aprslib.inet.IS = None
 aprs_socket_busy: bool = False
 aprs_user: str = ""
 
+# Telegram bot
+telegram_bot = None
+
 # Initialize logger
 def initialize_logger() -> None:
     # Global logger object
@@ -119,6 +122,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as ret_exc:
             app_logger.error(ret_exc)
             await update.message.reply_text(f'Welcome `{update.effective_user.first_name}`\nSomething was wrong while processing your registration request, please try again later', parse_mode='MarkdownV2')
+        # Send notification to admin
+        await send_to_admin(f"New user registered with id: `{update.effective_user.id}`")
 
 # Sets the callsign for the user
 async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -248,6 +253,20 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
             await update.message.reply_text(f'Some configuration field is invalid or missing, please check instructions')
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
+# Send the help message
+async def cmd_help(update: Update, context: CallbackContext) -> None:
+    await update.message.reply_text(
+        r"Here are the instructions for the APRS bot, there are few simple steps to configure it" + "\n\n" +
+        r"First you need to start the communication with the bot using the command `/start`, this will add you to the database\." + "\n" +
+        r"The same `/start` command can also be used to check if your account was enabled by an administrator, this is a manual process and may take some time\." + "\n\n" +
+        r"Once your account is enabled, you can start configure the APRS parameters as follows:" + "\n" +
+        r"`/setcall AA0BBB` to set your callsign to AA0BBB" + "\n" +
+        r"`/setssid 9` to set your APRS SSID to 9 \(default value for mobile stations\)" + "\n" +
+        r"`/setmsg Sent from a Telegram APRS bot` to set the APRS message to be sent" + "\n\n" +
+        r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
+        r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server"
+    , parse_mode='MarkdownV2')
 
 # Check if user is approved
 def is_user_approved(user_id: int) -> bool:
@@ -451,6 +470,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sqlite_cursor.execute("UPDATE users SET approved = True WHERE user_id = ? ", (target_user,))
             sqlite_connection.commit()
             await update.message.reply_text(f"User `{target_user}` was approved", parse_mode='MarkdownV2')
+            await send_to_user(r"Hurray! Your account was activated!", target_user)
         else:
             app_logger.info(f"User: [{target_user}] will be disapproved")
             sqlite_cursor.execute("UPDATE users SET approved = False WHERE user_id = ? ", (target_user,))
@@ -471,9 +491,19 @@ def start_telegram_polling() -> None:
     app.add_handler(CommandHandler("setmsg", cmd_setmsg))
     app.add_handler(CommandHandler("setssid", cmd_setssid))
     app.add_handler(CommandHandler("printcfg", cmd_printcfg))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.LOCATION, msg_location))
     app_logger.info("Starting polling")
     app.run_polling()
+    telegram_bot = app.bot
+
+# Send message to administrator
+async def send_to_admin(message: str) -> None:
+    await telegram_bot.send_message(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
+
+# Send message to chat id
+async def send_to_user(message: str, target: int) -> None:
+    await telegram_bot.send_message(chat_id=target, text=message, parse_mode='MarkdownV2')
 
 if __name__ == "__main__":
     initialize_logger()
