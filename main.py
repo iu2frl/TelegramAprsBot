@@ -9,6 +9,7 @@ import sqlite3
 import re
 import socket
 import aprslib
+import time
 from datetime import datetime, UTC
 from dateutil import parser
 from telegram import Update
@@ -18,15 +19,16 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 UNAUTHORIZED_MESSAGE = "You are not registered or approved yet, please send the /start command to begin and/or to check the registration status"
 
 # Logger oject
-app_logger: logging.Logger
+app_logger: logging.Logger = None
 
 # Database cursor
-sqlite_cursor: sqlite3.Connection.cursor
-sqlite_connection: sqlite3.Connection
+sqlite_cursor: sqlite3.Connection.cursor = None
+sqlite_connection: sqlite3.Connection = None
 
 # APRS socket
-aprs_socket: socket.socket
+aprs_socket: aprslib.inet.IS = None
 aprs_socket_busy: bool = False
+aprs_user: str = ""
 
 # Initialize logger
 def initialize_logger() -> None:
@@ -234,7 +236,12 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
         app_logger.debug(f"Configuration query returned: [{line}], len: [{len(line)}]")
         if line is not None and len(line) == 4:
             if update.message.location is not None:
-                await update.message.reply_text(f'Received:\n\nLatitude: {update.message.location.latitude}\nLongitude: {update.message.location.longitude}\nTolerance: {update.message.location.horizontal_accuracy}')
+                try:
+                    send_position(line[1], line[3], update.message.location.latitude, update.message.location.longitude, line[2])
+                    await update.message.reply_text(f'Received:\n\nLatitude: `{update.message.location.latitude}`\nLongitude: `{update.message.location.longitude}`\nTolerance: `{update.message.location.horizontal_accuracy}`', parse_mode='MarkdownV2')
+                except Exception as ret_exc:
+                    app_logger.error(ret_exc)
+                    await update.message.reply_text(f'An error occurred while sending the APRS location, please try again')
             else:
                 await update.message.reply_text(f'Cannot read location from the message, please try again')
         else:
@@ -275,7 +282,7 @@ def load_bot_token() -> str:
         return bot_token
     else:
         app_logger.error(f"Cannot load environment variables")
-        Exception("Cannot load BOT_TOKEN variable")
+        raise Exception("Cannot load BOT_TOKEN variable")
 
 # Identify the callsign in the given string
 def validate_callsign(input_call: str) -> bool:
@@ -343,18 +350,30 @@ def get_aprs_port() -> int:
             app_logger.error(ret_exc)
             return 14580
 
-# Build the APRS package
-def create_aprs_packet(callsign: str, ssid: str, latitude: float, longitude: float, comment: str) -> None:
-    # APRS packet format
-    date = datetime.now(timezone.utc)
-    package = f"{callsign}-{ssid}>APRS,TCPIP*:{date.hour}{date.minute}z!{latitude}{"N" if latitude > 0 else "S"}/{longitude}{"E" if longitude > 0 else "W"}-/ {comment}\n"
-    app_logger.debug(package)
-    return package
+# Convert the coordinates to APRS format
+def decimal_to_aprs(latitude, longitude):
+    # Latitude conversion
+    lat_deg = int(abs(latitude))  # Degrees
+    lat_min = (abs(latitude) - lat_deg) * 60  # Minutes
+    lat_dir = 'N' if latitude >= 0 else 'S'  # Direction
+
+    # Longitude conversion
+    lon_deg = int(abs(longitude))  # Degrees
+    lon_min = (abs(longitude) - lon_deg) * 60  # Minutes
+    lon_dir = 'E' if longitude >= 0 else 'W'  # Direction
+
+    # Format into APRS position format (DDMM.MM[N/S] and DDDMM.MM[E/W])
+    lat_aprs = f"{lat_deg:02d}{lat_min:05.2f}{lat_dir}"
+    lon_aprs = f"{lon_deg:03d}{lon_min:05.2f}{lon_dir}"
+
+    return lat_aprs, lon_aprs
 
 # Send the APRS position
-def send_position(callsign: str, ssid: str, latitude: float, longitude: float, comment: str) -> None:
+def send_position(callsign: str, ssid: str, latitude: float, longitude: float, comment: str, symbol: str = "$/") -> None:
     global app_logger
     global aprs_socket
+    global aprs_socket_busy
+    global aprs_user
 
     while aprs_socket_busy:
         time.sleep(1)
@@ -363,41 +382,51 @@ def send_position(callsign: str, ssid: str, latitude: float, longitude: float, c
         # Prevent multiple socket operations
         aprs_socket_busy = True
 
-        # Create a socket connection
-        if aprs_socket is None:
-            app_logger.info(f"Creating http socket")
-            aprs_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            aprs_socket.settimeout(5)
-
         # If socket is not connected, perform a connection
-        if not is_socket_connected(aprs_socket):
+        if aprs_socket is None or not aprs_socket._connected:
             app_logger.info("Loading APRS-IS parameters")
             aprs_host = get_aprs_is()
             aprs_port = get_aprs_port()
-            app_logger.info(f"Connecting to APRS-IS server at {aprs_host}:{aprs_port}")
-            aprs_socket.connect((aprs_host, aprs_port))
-            app_logger.info("Connected to the server, performing login")
-            login_packet = f"user {os.environ.get("APRS_USER", "")} pass {os.environ.get("APRS_PASS", "")} vers PythonAPRS\n"
-            aprs_socket.sendall(login_packet.encode('utf-8'))
-            time.sleep(1)  # Wait for a response
+            aprs_user = os.environ.get("APRS_USER", None)
+            if aprs_user is None:
+                app_logger.warning("No APRS_USER was configured, APRS-IS will run in read-only mode")
+                aprs_socket = aprslib.IS("N0CALL", host=aprs_host, port=aprs_port)
+            else:
+                aprs_pass = aprslib.passcode(aprs_user)
+                app_logger.info(f"Connecting to APRS-IS with user: [{aprs_user}] and passcode: [{aprs_pass}]")
+                aprs_socket = aprslib.IS(aprs_user, passwd=aprs_pass, host=aprs_host, port=aprs_port)
+            # Open connection
+            app_logger.info("Opening connection to the server")
+            aprs_socket.connect(blocking=False, retry=3)
+            #app_logger.info("Creating callback for the server")
+            #aprs_socket.consumer(aprs_callback, raw=True)
+            # send a single status message
+            app_logger.info("Sending status message")
+            aprs_socket.sendall("N0CALL>APRS,TCPIP*:>status text")
             app_logger.info("Logged to the server")
-            
-        # Create and send the APRS packet
-        aprs_packet = create_aprs_packet(callsign, ssid, latitude, longitude, comment)
-        aprs_socket.sendall(aprs_packet.encode('utf-8'))
-        app_logger.debug(f"Sent APRS packet: {aprs_packet.strip()}")
+
+        # Coordinates conversion
+        aprs_lat, aprs_lon = decimal_to_aprs(latitude, longitude)
+        timestamp = time.strftime("%H%M%Sz", time.gmtime())
+
+        # Create the APRS position report
+        message = {
+            'from': f"{callsign}-{ssid}",
+            'to': 'APRS',
+            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{symbol}{comment}",
+            'path': f'APRS,TCPIP*,qAC,{aprs_user}'  # Digipeater path
+        }
+
+        # Send the APRS message
+        aprs_packet = f"{message['from']}>{message['path']}:{message['msg']}"
+        app_logger.info(f"Sending: [{aprs_packet}]")
+        aprs_socket.sendall(aprs_packet)
+        app_logger.info(f"Package was sent succesfully")
     except Exception as ret_exc:
         app_logger.error(ret_exc)
+        raise Exception("Cannot send APRS packet")
     finally:
         aprs_socket_busy = False
-
-# Check if socket is connected
-def is_socket_connected(socket: socket.socket) -> bool:
-    try:
-        socket.send("test")
-        return True
-    except:
-        return False
 
 # APRS callback
 def aprs_callback(aprs_packet):
