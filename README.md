@@ -143,7 +143,7 @@ Feel free to submit issues, fork the repository, and create pull requests for an
 
 ## License
 
-Released with MIT License, see [LICENSE](./LICENSE)
+Released with GNU GPL V3 License, see [LICENSE](./LICENSE)
 
 ## Acknowledgments
 
