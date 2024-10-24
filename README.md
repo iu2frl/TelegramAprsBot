@@ -22,7 +22,7 @@ A Python bot that allows users to send their location to APRS (Automatic Packet 
 1. Clone this repository:
 ```bash
 git clone <repository-url>
-cd aprs-telegram-bot
+cd TelegramAprsBot
 ```
 
 2. Install required dependencies:
