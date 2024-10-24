@@ -31,7 +31,7 @@ aprs_socket_busy: bool = False
 aprs_user: str = ""
 
 # Telegram bot
-telegram_bot = None
+telegram_app = None
 
 # Initialize logger
 def initialize_logger() -> None:
@@ -123,7 +123,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             app_logger.error(ret_exc)
             await update.message.reply_text(f'Welcome `{update.effective_user.first_name}`\nSomething was wrong while processing your registration request, please try again later', parse_mode='MarkdownV2')
         # Send notification to admin
-        await send_to_admin(f"New user registered with id: `{update.effective_user.id}`")
+        await send_to_admin(r"New user registered with id\: `" +  str(update.effective_user.id) + r"`\n\nApprove it with: `/approve " + str(update.effective_user.id) + "`")
 
 # Sets the callsign for the user
 async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -474,7 +474,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sqlite_cursor.execute("UPDATE users SET approved = True WHERE user_id = ? ", (target_user,))
             sqlite_connection.commit()
             await update.message.reply_text(f"User `{target_user}` was approved", parse_mode='MarkdownV2')
-            await send_to_user(r"Hurray! Your account was activated!", target_user)
+            await send_to_user(r"Hurray\! Your account was activated\!", target_user)
         else:
             app_logger.info(f"User: [{target_user}] will be disapproved")
             sqlite_cursor.execute("UPDATE users SET approved = False WHERE user_id = ? ", (target_user,))
@@ -486,31 +486,30 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Start polling of the bot
 def start_telegram_polling() -> None:
     global app_logger
-    global telegram_bot
+    global telegram_app
     app_logger.info("Loading token from environment and building application")
-    app = ApplicationBuilder().token(load_bot_token()).build()
+    telegram_app = ApplicationBuilder().token(load_bot_token()).build()
     app_logger.info("Creating command handlers")
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("setcall", cmd_setcall))
-    app.add_handler(CommandHandler("approve", cmd_approve))
-    app.add_handler(CommandHandler("setmsg", cmd_setmsg))
-    app.add_handler(CommandHandler("setssid", cmd_setssid))
-    app.add_handler(CommandHandler("printcfg", cmd_printcfg))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(MessageHandler(filters.LOCATION, msg_location))
+    telegram_app.add_handler(CommandHandler("start", cmd_start))
+    telegram_app.add_handler(CommandHandler("setcall", cmd_setcall))
+    telegram_app.add_handler(CommandHandler("approve", cmd_approve))
+    telegram_app.add_handler(CommandHandler("setmsg", cmd_setmsg))
+    telegram_app.add_handler(CommandHandler("setssid", cmd_setssid))
+    telegram_app.add_handler(CommandHandler("printcfg", cmd_printcfg))
+    telegram_app.add_handler(CommandHandler("help", cmd_help))
+    telegram_app.add_handler(MessageHandler(filters.LOCATION, msg_location))
     app_logger.info("Starting polling")
-    app.run_polling()
-    telegram_bot = app.bot
+    telegram_app.run_polling()
 
 # Send message to administrator
 async def send_to_admin(message: str) -> None:
-    global telegram_bot
-    await telegram_bot.send_message(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
+    global telegram_app
+    await telegram_bot.sendMessage(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
-    global telegram_bot
-    await telegram_bot.send_message(chat_id=target, text=message, parse_mode='MarkdownV2')
+    global telegram_app
+    await telegram_app.bot.sendMessage(chat_id=target, text=message, parse_mode='MarkdownV2')
 
 if __name__ == "__main__":
     initialize_logger()
