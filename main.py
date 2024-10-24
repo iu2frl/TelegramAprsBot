@@ -136,7 +136,7 @@ async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if is_user_approved(update.effective_sender.id):
         # Check if the callsign was provided
         if len(update.effective_message.text.split(" ")) != 2:
-            app_logger.warning(f"Invalid callsign received [{update.effective_message.text}]")
+            app_logger.warning(f"Invalid callsign received [{update.effective_message.text}] from [{update.effective_sender.id}]")
             await update.message.reply_text(f"Cannot detect callsign argument, syntax is: `/setcall AA0BBB`", parse_mode='MarkdownV2')
             return
         # Clean the string and check validity
@@ -243,7 +243,11 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
             if update.message.location is not None:
                 try:
                     send_position(line[1], line[3], update.message.location.latitude, update.message.location.longitude, line[2])
-                    await update.message.reply_text(f'Received:\n\nLatitude: `{update.message.location.latitude}`\nLongitude: `{update.message.location.longitude}`\nTolerance: `{update.message.location.horizontal_accuracy}`', parse_mode='MarkdownV2')
+                    await update.message.reply_text(
+                        f'Position was sent:\n\nLatitude: `{update.message.location.latitude}`\n' + 
+                        f'Longitude: `{update.message.location.longitude}`\n' +
+                        r'Map link\: https\:\/\/aprs\.fi\/\#\!call\=a\%2F' + str(line[1]) + r'\-' + str(line[3]) + r'\&timerange\=3600\&tail\=3600',
+                        parse_mode='MarkdownV2')
                 except Exception as ret_exc:
                     app_logger.error(ret_exc)
                     await update.message.reply_text(f'An error occurred while sending the APRS location, please try again')
@@ -482,6 +486,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Start polling of the bot
 def start_telegram_polling() -> None:
     global app_logger
+    global telegram_bot
     app_logger.info("Loading token from environment and building application")
     app = ApplicationBuilder().token(load_bot_token()).build()
     app_logger.info("Creating command handlers")
@@ -499,10 +504,12 @@ def start_telegram_polling() -> None:
 
 # Send message to administrator
 async def send_to_admin(message: str) -> None:
+    global telegram_bot
     await telegram_bot.send_message(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
+    global telegram_bot
     await telegram_bot.send_message(chat_id=target, text=message, parse_mode='MarkdownV2')
 
 if __name__ == "__main__":
