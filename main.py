@@ -7,13 +7,15 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sqlite3
 import re
-from datetime import datetime
+import socket
+import aprslib
+from datetime import datetime, UTC
 from dateutil import parser
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackContext
 
 # Configuration
-UNAUTHORIZED_MESSAGE = "You are not registered or approved yet, please send the /start command to begin"
+UNAUTHORIZED_MESSAGE = "You are not registered or approved yet, please send the /start command to begin and/or to check the registration status"
 
 # Logger oject
 app_logger: logging.Logger
@@ -21,6 +23,10 @@ app_logger: logging.Logger
 # Database cursor
 sqlite_cursor: sqlite3.Connection.cursor
 sqlite_connection: sqlite3.Connection
+
+# APRS socket
+aprs_socket: socket.socket
+aprs_socket_busy: bool = False
 
 # Initialize logger
 def initialize_logger() -> None:
@@ -66,7 +72,17 @@ def connect_to_sqlite() -> None:
     sqlite_cursor = sqlite_connection.cursor()
     # Initialize tables
     app_logger.info("Initializing database tables")
-    sqlite_cursor.execute("CREATE TABLE IF NOT EXISTS users (user_name TEXT, user_id INTEGER NOT NULL, registration_date DATETIME NOT NULL, approved BOOL DEFAULT False, user_callsign TEXT, user_comment TEXT)")
+    sqlite_cursor.execute(
+        "CREATE TABLE IF NOT EXISTS users (" +
+            "user_name TEXT DEFAULT \"\", " +
+            "user_id INTEGER NOT NULL, " + 
+            "registration_date DATETIME NOT NULL, " + 
+            "approved BOOL DEFAULT False, " + 
+            "user_callsign TEXT DEFAULT \"\", " +
+            "user_comment TEXT DEFAULT \"\", " + 
+            "user_ssid TEXT DEFAULT \"9\", " + 
+            "aprs_interval INTEGER DEFAULT 120"
+            ")")
     sqlite_connection.commit()
 
 # Starts a conversation with the user
@@ -84,23 +100,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         first_line = query_result[0]
         await update.message.reply_text(
             f'Welcome back {update.effective_user.first_name}\n\n' +
-            f'\- Registration date: `{datetime_print(first_line[1])} UTC`\n' +
-            f'\- Account status: `{"approved" if bool(first_line[2]) else "pending approval" }`', 
+            f' Registration date: `{datetime_print(first_line[1])} UTC`\n' +
+            f' Account status: `{"approved" if bool(first_line[2]) else "pending approval" }`', 
             parse_mode='MarkdownV2')
     else:
         try:
             app_logger.info(f"Registering new user with id [{update.effective_user.id}]")
-            sqlite_cursor.execute("INSERT INTO users(user_name, user_id, registration_date) VALUES (?,?,?)", (update.effective_user.name, update.effective_user.id,datetime.utcnow()))
+            sqlite_cursor.execute("INSERT INTO users(user_name, user_id, registration_date) VALUES (?,?,?)", (update.effective_user.name, update.effective_user.id,datetime.now(UTC)))
             sqlite_connection.commit()
             await update.message.reply_text(
                 f'Welcome {update.effective_user.first_name}\n' +
                 f'You just accessed the IU2FRL APRS bot\n\n' +
-                f'\- Registration date: `{datetime_print(datetime.utcnow())} UTC`\n' +
-                '\- Account status: `pending approval`', 
+                f' Registration date: `{datetime_print(datetime.now(UTC))} UTC`\n' +
+                ' Account status: `pending approval`', 
                 parse_mode='MarkdownV2')
         except Exception as ret_exc:
             app_logger.error(ret_exc)
-            await update.message.reply_text(f'Welcome `{update.effective_user.first_name}`\nSomething was wrong while processing your registration request, please try again later')
+            await update.message.reply_text(f'Welcome `{update.effective_user.first_name}`\nSomething was wrong while processing your registration request, please try again later', parse_mode='MarkdownV2')
 
 # Sets the callsign for the user
 async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -111,22 +127,118 @@ async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
-        clean_message = str(update.effective_message.text).replace("/setcall ", "").strip().split(" ")[0]
+        # Check if the callsign was provided
+        if len(update.effective_message.text.split(" ")) != 2:
+            app_logger.warning(f"Invalid callsign received [{update.effective_message.text}]")
+            await update.message.reply_text(f"Cannot detect callsign argument, syntax is: `/setcall AA0BBB`", parse_mode='MarkdownV2')
+            return
+        # Clean the string and check validity
+        clean_message = str(update.effective_message.text).replace("/setcall ", "").strip().split(" ")[0].upper()
         if validate_callsign(clean_message):
             app_logger.info(f"User: [{update._effective_sender.username}] updated callsign to: [{clean_message}]")
             sqlite_cursor.execute("UPDATE users SET user_callsign = ? WHERE user_id = ? ", (clean_message, update.effective_sender.id))
             sqlite_connection.commit()
-            await update.message.reply_text(f"Callsign was updated to `{clean_message}`")
+            await update.message.reply_text(f"Callsign was updated to `{clean_message}`", parse_mode='MarkdownV2')
         else:
-            app_logger.warning(f"User: [{update._effective_sender.username}] tried to updat callsign to: [{clean_message}] which is invalid")
-            await update.message.reply_text(f"Callsign `{clean_message}` could not be recognized as valid callsign")
+            app_logger.warning(f"User: [{update._effective_sender.username}] tried to update callsign to: [{clean_message}] which is invalid")
+            await update.message.reply_text(f"The requested callsign `{clean_message}` could not be recognized as valid callsign", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
+# Sets the message for the user
+async def cmd_setmsg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global app_logger
+    global sqlite_cursor
+    global sqlite_connection
+    # Register new users to the application
+    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Message: [{update}]")
+    if is_user_approved(update.effective_sender.id):
+        # Check if the message was provided
+        if len(update.effective_message.text.split(" ")) < 2:
+            app_logger.warning(f"Invalid message received [{update.effective_message.text}]")
+            await update.message.reply_text(r"Cannot detect message argument, syntax is: `/setmsg Hello World!`", parse_mode='MarkdownV2')
+            return
+        # Clean the string and check validity
+        clean_message = str(update.effective_message.text).replace("/setmsg ", "").strip()
+        if len(clean_message) > 0:
+            app_logger.info(f"User: [{update._effective_sender.username}] updated message to: [{clean_message}]")
+            sqlite_cursor.execute("UPDATE users SET user_comment = ? WHERE user_id = ? ", (clean_message, update.effective_sender.id))
+            sqlite_connection.commit()
+            await update.message.reply_text(f"Message was updated to `{clean_message}`", parse_mode='MarkdownV2')
+        else:
+            app_logger.warning(f"User: [{update._effective_sender.username}] tried to update message to: [{clean_message}] which is invalid")
+            await update.message.reply_text(f"The requested message `{clean_message}` could not processed", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
+# Sets the message for the user
+async def cmd_setssid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global app_logger
+    global sqlite_cursor
+    global sqlite_connection
+    # Register new users to the application
+    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Message: [{update}]")
+    if is_user_approved(update.effective_sender.id):
+        # Check if the message was provided
+        if len(update.effective_message.text.split(" ")) != 2:
+            app_logger.warning(f"Invalid SSID received [{update.effective_message.text}]")
+            await update.message.reply_text(r"Cannot detect SSID argument, syntax is: `/setssid 9`", parse_mode='MarkdownV2')
+            return
+        # Clean the string and check validity
+        clean_message = str(update.effective_message.text).replace("/setssid ", "").strip().upper()
+        if len(clean_message) in [1, 2] :
+            app_logger.info(f"User: [{update._effective_sender.username}] updated SSID to: [{clean_message}]")
+            sqlite_cursor.execute("UPDATE users SET user_ssid = ? WHERE user_id = ? ", (clean_message, update.effective_sender.id))
+            sqlite_connection.commit()
+            await update.message.reply_text(f"SSID was updated to `{clean_message}`", parse_mode='MarkdownV2')
+        else:
+            app_logger.warning(f"User: [{update._effective_sender.username}] tried to update SSID to: [{clean_message}] which is invalid")
+            await update.message.reply_text(f"The requested SSID `{clean_message}` could not processed, length must be 1 or 2 characters", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
+# Sets the message for the user
+async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global app_logger
+    global sqlite_cursor
+    global sqlite_connection
+
+    # Register new users to the application
+    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Message: [{update}]")
+
+    if is_user_approved(update.effective_sender.id):
+        try:
+            result = sqlite_cursor.execute("SELECT user_id, user_callsign, user_comment, user_ssid, aprs_interval FROM users WHERE user_id = ?", (update.effective_user.id,)).fetchone()
+            await update.message.reply_text(
+                "Current configuration:\n\n" +
+                f"User ID: `{result[0]}`\n" +
+                f"Callsign: `{result[1]}`\n" + 
+                f"SSID: `{result[3]}`\n" + 
+                f"APRS callsign: `{result[1]}-{result[3]}`\n" +
+                f"Comment: `{result[2]}`\n" +
+                f"Beacon interval: `{result[4]}s`",
+                parse_mode='MarkdownV2')
+        except Exception as ret_exc:
+            app_logger.error(ret_exc)
+            await update.message.reply_text("Error while retrieving data from the database, please try again later")
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
 
 # Parse the location and send it via APRS
 async def msg_location(update: Update, context: CallbackContext) -> None:
     if is_user_approved(update.effective_sender.id):
-        await update.message.reply_text(f'Received location: `{update}`', parse_mode='MarkdownV2')
+        line = sqlite_cursor.execute("SELECT user_id, user_callsign, user_comment, user_ssid FROM users WHERE user_id = ?", (update.effective_sender.id,)).fetchone()
+        app_logger.debug(f"Configuration query returned: [{line}], len: [{len(line)}]")
+        if line is not None and len(line) == 4:
+            if update.message.location is not None:
+                await update.message.reply_text(f'Received:\n\nLatitude: {update.message.location.latitude}\nLongitude: {update.message.location.longitude}\nTolerance: {update.message.location.horizontal_accuracy}')
+            else:
+                await update.message.reply_text(f'Cannot read location from the message, please try again')
+        else:
+            await update.message.reply_text(f'Some configuration field is invalid or missing, please check instructions')
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
 
@@ -145,7 +257,7 @@ def datetime_print(input_date: any, markdown: bool = True) -> str:
         input_date = parser.parse(input_date)
 
     if markdown:
-        return input_date.strftime("%d\/%m\/%Y %H\:%M\:%S")
+        return input_date.strftime(r"%d\/%m\/%Y %H\:%M\:%S")
     else:
         return input_date.strftime("%d/%m/%Y %H:%M:%S")
 
@@ -214,6 +326,83 @@ def get_admin_id() -> int:
             app_logger.error(ret_exc)
             return -1
 
+# Get the APRS IS address
+def get_aprs_is() -> str:
+    return os.environ.get("APRS_SERVER", "rotate.aprs2.net")
+
+# Get the APRS port
+def get_aprs_port() -> int:
+    port = os.environ.get("APRS_PORT", None)
+
+    if port is None:
+        return 14580
+    else:
+        try:
+            return int(port)
+        except Exception as ret_exc:
+            app_logger.error(ret_exc)
+            return 14580
+
+# Build the APRS package
+def create_aprs_packet(callsign: str, ssid: str, latitude: float, longitude: float, comment: str) -> None:
+    # APRS packet format
+    date = datetime.now(timezone.utc)
+    package = f"{callsign}-{ssid}>APRS,TCPIP*:{date.hour}{date.minute}z!{latitude}{"N" if latitude > 0 else "S"}/{longitude}{"E" if longitude > 0 else "W"}-/ {comment}\n"
+    app_logger.debug(package)
+    return package
+
+# Send the APRS position
+def send_position(callsign: str, ssid: str, latitude: float, longitude: float, comment: str) -> None:
+    global app_logger
+    global aprs_socket
+
+    while aprs_socket_busy:
+        time.sleep(1)
+
+    try:
+        # Prevent multiple socket operations
+        aprs_socket_busy = True
+
+        # Create a socket connection
+        if aprs_socket is None:
+            app_logger.info(f"Creating http socket")
+            aprs_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            aprs_socket.settimeout(5)
+
+        # If socket is not connected, perform a connection
+        if not is_socket_connected(aprs_socket):
+            app_logger.info("Loading APRS-IS parameters")
+            aprs_host = get_aprs_is()
+            aprs_port = get_aprs_port()
+            app_logger.info(f"Connecting to APRS-IS server at {aprs_host}:{aprs_port}")
+            aprs_socket.connect((aprs_host, aprs_port))
+            app_logger.info("Connected to the server, performing login")
+            login_packet = f"user {os.environ.get("APRS_USER", "")} pass {os.environ.get("APRS_PASS", "")} vers PythonAPRS\n"
+            aprs_socket.sendall(login_packet.encode('utf-8'))
+            time.sleep(1)  # Wait for a response
+            app_logger.info("Logged to the server")
+            
+        # Create and send the APRS packet
+        aprs_packet = create_aprs_packet(callsign, ssid, latitude, longitude, comment)
+        aprs_socket.sendall(aprs_packet.encode('utf-8'))
+        app_logger.debug(f"Sent APRS packet: {aprs_packet.strip()}")
+    except Exception as ret_exc:
+        app_logger.error(ret_exc)
+    finally:
+        aprs_socket_busy = False
+
+# Check if socket is connected
+def is_socket_connected(socket: socket.socket) -> bool:
+    try:
+        socket.send("test")
+        return True
+    except:
+        return False
+
+# APRS callback
+def aprs_callback(aprs_packet):
+    print(aprs_packet)
+
 # Approve new user
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global app_logger
@@ -250,8 +439,9 @@ def start_telegram_polling() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("setcall", cmd_setcall))
     app.add_handler(CommandHandler("approve", cmd_approve))
-    #app.add_handler(CommandHandler("setmsg", cmd_setcall))
-    #app.add_handler(CommandHandler("setssid", cmd_setcall))
+    app.add_handler(CommandHandler("setmsg", cmd_setmsg))
+    app.add_handler(CommandHandler("setssid", cmd_setssid))
+    app.add_handler(CommandHandler("printcfg", cmd_printcfg))
     app.add_handler(MessageHandler(filters.LOCATION, msg_location))
     app_logger.info("Starting polling")
     app.run_polling()
