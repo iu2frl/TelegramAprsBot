@@ -10,6 +10,7 @@ import re
 import socket
 import aprslib
 import time
+from sys import stdout
 from datetime import datetime, UTC
 from dateutil import parser
 from telegram import Update
@@ -58,6 +59,10 @@ def initialize_logger() -> None:
     app_logger.setLevel(logging.INFO)
     # Reduce logging for http requests
     logging.getLogger('httpx').setLevel(logging.WARNING)
+    # Add stdio output
+    consoleHandler = logging.StreamHandler(stdout)
+    consoleHandler.setFormatter(log_formatter)
+    app_logger.addHandler(consoleHandler)
 
 # Connect to the local SQLite file
 def connect_to_sqlite() -> None:
