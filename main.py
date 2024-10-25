@@ -754,10 +754,11 @@ async def cmd_help(update: Update, context: CallbackContext) -> None:
         r"Once your account is enabled, you can start configure the APRS parameters as follows:" + "\n" +
         r"`/setcall AA0BBB` to set your callsign to AA0BBB" + "\n" +
         r"`/setssid 9` to set your APRS SSID to 9 \(default value for mobile stations\)" + "\n" +
+        r"`/seticon $/` to set your APRS icon to a phone icon" + "\n" +
         r"`/setinterval 120` to set the minimum beaconing interval to 120s" + "\n" +
         r"`/setmsg Hello` to set the APRS message to be sent" + "\n\n" +
         r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
-        r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server"
+        r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server\. You can also share a live position to enable automatic beaconing."
     , parse_mode='MarkdownV2')
 
 # Check if user is approved
