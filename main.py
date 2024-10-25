@@ -155,14 +155,28 @@ async def handle_live_location(update: Update, context: CallbackContext) -> None
     
     if new_session:
         app_logger.info(f"Starting beacon for `{callsign}-{ssid}`")
-        await telegram_app.bot.sendMessage(chat_id=user_id, text=
-            f"Started live location tracking:\n\n" +
-            f"Minimum update interval: `{db_interval}s`\n" +
-            f"Sending beacons until: `{datetime_print(session.end_sharing)} UTC`\n" +
-            f"Next update after: `{datetime_print(session.next_update)} UTC`",
+        initial_message = await telegram_app.bot.sendMessage(
+            chat_id=user_id,
+            text=
+                f"Started live location tracking:\n\n" +
+                f"Minimum update interval: `{db_interval}s`\n" +
+                f"Sending beacons until: `{datetime_print(session.end_sharing)} UTC`\n",
+                #f"Next update after: `{datetime_print(session.next_update)} UTC`",
             parse_mode='MarkdownV2'
         )
+        app_logger.info(f"Started logger for user [{user_id}] with first message [{initial_message.id}]")
+        active_sessions[user_id].start_message = initial_message.id
     else:
+        # For some reason it always return "message not found"
+        # await telegram_app.bot.edit_message_text(
+        #     chat_id=user_id,
+        #     message_id=active_sessions[user_id].start_message, 
+        #     text=
+        #         f"Live location tracking:\n\n" +
+        #         f"Minimum update interval: `{db_interval}s`\n" +
+        #         f"Sending beacons until: `{datetime_print(session.end_sharing)} UTC`\n" +
+        #         f"Next update after: `{datetime_print(session.next_update)} UTC`",
+        #     )
         app_logger.debug(f"Updating position for [{callsign}-{ssid}]")
 
     aprs_parameters = load_aprs_parameters_for_user(update.effective_user.id)
@@ -1148,20 +1162,37 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # Lists all users
 async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    
+    Lists all registered users.
+
+    This function handles the `/listusers` command, allowing an admin to fetch and display a list of all registered users.
+    It performs the following steps:
+    1. Checks if the command sender is an admin.
+    2. Sends an initial message indicating that the user list is being fetched.
+    3. Queries the database for all user IDs.
+    4. Updates the initial message with the number of users found.
+    5. Iterates through the list of user IDs, fetching and displaying each user's details.
+    6. Sends a message if no users are found.
+    7. Logs the process and handles any exceptions.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
     """
     global app_logger
     if is_admin(update.effective_user.id):
         global sqlite_cursor
-        message_id = await update.message.reply_text(f"Fetching users list, please wait", parse_mode='MarkdownV2')
+        first_message = await update.message.reply_text(f"Fetching users list, please wait", parse_mode='MarkdownV2')
         id_list = sqlite_cursor.execute("SELECT user_id FROM users WHERE True").fetchall()
         if len(id_list) > 0:
-            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=message_id.id, text=f"Found {len(id_list)} users")
+            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=first_message.id, text=f"Found {len(id_list)} users")
             for user in id_list:
                 user_data = load_aprs_parameters_for_user(user[0])
                 await update.message.reply_text(f"User id: `{user_data.user_id}`\nCallsign: `{user_data.aprs_callsign}`\nComment: `{user_data.aprs_comment}`\nUsername: {user_data.username}\nRegistration date: `{datetime_print(user_data.registration_date)} UTC`", parse_mode='MarkdownV2')
         else:
-            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=message_id.id, text="No users were found")
+            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=first_message.id, text="No users were found")
     else:
         app_logger.warning(f"User [{update.effective_user.id}] is not an administrator")
 

@@ -81,6 +81,7 @@ python main.py
 - `/printcfg` - Display current configuration
 - `/help` - Show help message
 - `/approve <user_id>` - (Admin only) Approve a user
+- `/listusers <user_id>` - (Admin only) Lists the registered users
 
 ## Directory Structure
 
