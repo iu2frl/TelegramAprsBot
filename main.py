@@ -84,11 +84,11 @@ class AprsParameters:
         user_interval (int): Minimum interval between position updates in seconds
     """
     user_id: int
-    user_callsign: str
-    user_comment: str
-    user_ssid: str
+    aprs_callsign: str
+    aprs_comment: str
+    aprs_ssid: str
     aprs_icon: str
-    user_interval: int
+    update_interval: int
 
 # Global dictionary to store active live location sessions
 active_sessions: Dict[int, LiveLocationSession] = {}
@@ -623,12 +623,12 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(
                 "Current configuration:\n\n" +
                 f"User ID: `{result.user_id}`\n" +
-                f"Callsign: `{result.user_callsign}`\n" + 
-                f"SSID: `{result.user_ssid}`\n" + 
-                f"APRS callsign: `{result.user_callsign}-{result.user_ssid}`\n" +
-                f"Comment: `{result.user_comment}`\n" +
+                f"Callsign: `{result.aprs_callsign}`\n" + 
+                f"SSID: `{result.aprs_ssid}`\n" + 
+                f"APRS callsign: `{result.aprs_callsign}-{result.aprs_ssid}`\n" +
+                f"Comment: `{result.aprs_comment}`\n" +
                 f"Icon: `{result.aprs_icon}`\n" +
-                f"Beacon interval: `{result.user_interval}s`",
+                f"Beacon interval: `{result.update_interval}s`",
                 parse_mode='MarkdownV2')
         except Exception as ret_exc:
             app_logger.error(ret_exc)
@@ -675,7 +675,7 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
                 await update.effective_message.reply_text(
                     f'Position was sent:\n\nLatitude: `{update.effective_message.location.latitude}`\n' + 
                     f'Longitude: `{update.effective_message.location.longitude}`\n' +
-                    r'Map link\: https\:\/\/aprs\.fi\/\#\!call\=a\%2F' + aprs_parameters.user_callsign + r'\-' + aprs_parameters.user_ssid + r'\&timerange\=3600\&tail\=3600',
+                    r'Map link\: https\:\/\/aprs\.fi\/\#\!call\=a\%2F' + aprs_parameters.aprs_callsign + r'\-' + aprs_parameters.aprs_ssid + r'\&timerange\=3600\&tail\=3600',
                     parse_mode='MarkdownV2'
                 )
             except Exception as ret_exc:
@@ -725,11 +725,11 @@ def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
     if line is not None and len(line) == 6:
         return AprsParameters(
             user_id=line[0],
-            user_callsign=line[1],
-            user_comment=line[2],
-            user_ssid=line[3],
+            aprs_callsign=line[1],
+            aprs_comment=line[2],
+            aprs_ssid=line[3],
             aprs_icon=line[4],
-            user_interval=line[5]
+            update_interval=line[5]
         )
     else:
         app_logger.warn("Database returned an unexpected result length for this query")
@@ -1071,9 +1071,9 @@ def send_position(aprs_details: AprsParameters, latitude: float, longitude: floa
 
         # Create the APRS position report
         message = {
-            'from': f"{aprs_details.user_callsign}-{aprs_details.user_ssid}",
+            'from': f"{aprs_details.aprs_callsign}-{aprs_details.aprs_ssid}",
             'to': 'APRS',
-            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.user_comment}",
+            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.aprs_comment}",
             'path': f'APRS,TCPIP*,qAC,{aprs_user}'  # Digipeater path
         }
 
