@@ -10,11 +10,14 @@ import re
 import socket
 import aprslib
 import time
+import asyncio
 from sys import stdout
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from dateutil import parser
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackContext
+from typing import Dict, Optional
+from dataclasses import dataclass
 
 # Configuration
 UNAUTHORIZED_MESSAGE = "You are not registered or approved yet, please send the /start command to begin and/or to check the registration status"
@@ -33,6 +36,104 @@ aprs_user: str = ""
 
 # Telegram bot
 telegram_app = None
+
+@dataclass
+class LiveLocationSession:
+    user_id: int
+    chat_id: int
+    callsign: str
+    ssid: str
+    comment: str
+    next_update: datetime
+    end_sharing: datetime
+    start_message: int
+
+@dataclass
+class AprsParameters:
+    user_id: int
+    user_callsign: str
+    user_comment: str
+    user_ssid: str
+    user_symbol: str
+    user_interval: int
+
+# Global dictionary to store active live location sessions
+active_sessions: Dict[int, LiveLocationSession] = {}
+
+# Live location was sent
+async def handle_live_location(update: Update, context: CallbackContext) -> None:
+    """Handle incoming live location updates"""
+    global telegram_app
+    new_session = True
+
+    if not is_user_approved(update.effective_sender.id):
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+        return
+
+    # Get user configuration
+    user_config = sqlite_cursor.execute(
+        "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_interval FROM users WHERE user_id = ?", 
+        (update.effective_sender.id,)
+    ).fetchone()
+    
+    if not user_config:
+        await update.message.reply_text("Cannot find user configuration. Please set up your APRS parameters first.")
+        return
+
+    user_id, callsign, comment, ssid, db_interval = user_config
+    
+    # If there's an existing session for this user, cancel it
+    for beacon in list(active_sessions.values()):  # Create a copy of values to avoid runtime modification issues
+        if user_id == beacon.user_id:
+            new_session = False
+            app_logger.debug(f"Received coordinates update, but user [{user_id}] already has a tracking session enabled")
+            if beacon.next_update > datetime.now(UTC):
+                return
+    
+    # Create new session
+    session = LiveLocationSession(
+        user_id=user_id,
+        chat_id=update.effective_chat.id,
+        callsign=callsign,
+        ssid=ssid,
+        comment=comment,
+        next_update=datetime.now(UTC) + timedelta(seconds=db_interval),
+        end_sharing=update.effective_message.date + timedelta(seconds=update.effective_message.location.live_period),
+        start_message = -1
+    )
+    
+    active_sessions[user_id] = session
+    
+    if new_session:
+        app_logger.info(f"Starting beacon for `{callsign}-{ssid}`")
+        await telegram_app.bot.sendMessage(chat_id=user_id, text=
+            f"Started live location tracking:\n\n" +
+            f"Minimum update interval: `{db_interval}s`\n" +
+            f"Sending beacons until: `{datetime_print(session.end_sharing)} UTC`\n" +
+            f"Next update after: `{datetime_print(session.next_update)} UTC`",
+            parse_mode='MarkdownV2'
+        )
+    else:
+        app_logger.debug(f"Updating position for [{callsign}-{ssid}]")
+
+    aprs_parameters = load_aprs_parameters_for_user(update.effective_user.id)
+    if aprs_parameters is not None:
+        send_position(aprs_parameters, update.effective_message.location.latitude, update.effective_message.location.longitude)
+
+# Stop the process
+async def stop_live_tracking(user_id: int) -> bool:
+    """Stop live location tracking for a user"""
+    # If there's an existing session for this user, cancel it
+    deleted_tracker = False
+    for beacon in list(active_sessions.values()):  # Create a copy of values to avoid runtime modification issues
+        if beacon.user_id == user_id:
+            try:
+                del active_sessions[user_id]
+                app_logger.info(f"Stopped tracking for user {user_id}")
+                deleted_tracker = True
+            except Exception as ret_exc:
+                app_logger.error(f"Cannot delete tracker for: {user_id}, error: {ret_exc}")
+    return deleted_tracker
 
 # Initialize logger
 def initialize_logger() -> None:
@@ -89,9 +190,10 @@ def connect_to_sqlite() -> None:
             "registration_date DATETIME NOT NULL, " + 
             "approved BOOL DEFAULT False, " + 
             "user_callsign TEXT DEFAULT \"\", " +
-            "user_comment TEXT DEFAULT \"\", " + 
+            "user_comment TEXT DEFAULT \"IU2FRL Telegram APRS bot\", " + 
             "user_ssid TEXT DEFAULT \"9\", " + 
-            "aprs_interval INTEGER DEFAULT 120"
+            "aprs_interval INTEGER DEFAULT 30, " +
+            "aprs_symbol TEXT DEFAULT \"$/\""
             ")")
     sqlite_connection.commit()
 
@@ -128,7 +230,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             app_logger.error(ret_exc)
             await update.message.reply_text(f'Welcome `{update.effective_user.first_name}`\nSomething was wrong while processing your registration request, please try again later', parse_mode='MarkdownV2')
         # Send notification to admin
-        await send_to_admin(r"New user registered with id\: `" +  str(update.effective_user.id) + r"`\n\nApprove it with: `/approve " + str(update.effective_user.id) + "`")
+        await send_to_admin(
+            r"New user registered\: \@" +  str(update.effective_user.username) + "\n\n" + 
+            r"Name\: " + str(update.effective_sender.first_name) + "\n" + 
+            r"Surname\: " + str(update.effective_sender.last_name) + "\n" +
+            r"Approve it with: `/approve " + str(update.effective_user.id) + "`")
 
 # Sets the callsign for the user
 async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,6 +317,34 @@ async def cmd_setssid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
 
+# Sets the update interval for the user
+async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global app_logger
+    global sqlite_cursor
+    global sqlite_connection
+    # Register new users to the application
+    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Message: [{update}]")
+    if is_user_approved(update.effective_sender.id):
+        # Check if the message was provided
+        if len(update.effective_message.text.split(" ")) != 2:
+            app_logger.warning(f"Invalid time received [{update.effective_message.text}]")
+            await update.message.reply_text(r"Cannot detect interval value, syntax is: `/setinterval 120`", parse_mode='MarkdownV2')
+            return
+        # Clean the string and check validity
+        clean_message = str(update.effective_message.text).replace("/setinterval ", "").strip()
+        try:
+            update_time = int(clean_message)
+            app_logger.info(f"User: [{update._effective_sender.username}] updated interval to: [{update_time}]s")
+            sqlite_cursor.execute("UPDATE users SET aprs_interval = ? WHERE user_id = ? ", (update_time, update.effective_sender.id))
+            sqlite_connection.commit()
+            await update.message.reply_text(f"Update interval was updated to `{clean_message}` seconds", parse_mode='MarkdownV2')
+        except Exception as ret_exc:
+            app_logger.warning(f"User: [{update._effective_sender.username}] tried to update interval to: [{clean_message}]s which is invalid, error: {ret_exc}")
+            await update.message.reply_text(f"The requested update interval `{clean_message}` could not processed, please try again", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
 # Sets the message for the user
 async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global app_logger
@@ -223,15 +357,16 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if is_user_approved(update.effective_sender.id):
         try:
-            result = sqlite_cursor.execute("SELECT user_id, user_callsign, user_comment, user_ssid, aprs_interval FROM users WHERE user_id = ?", (update.effective_user.id,)).fetchone()
+            result = load_aprs_parameters_for_user(update.effective_sender.id)
             await update.message.reply_text(
                 "Current configuration:\n\n" +
-                f"User ID: `{result[0]}`\n" +
-                f"Callsign: `{result[1]}`\n" + 
-                f"SSID: `{result[3]}`\n" + 
-                f"APRS callsign: `{result[1]}-{result[3]}`\n" +
-                f"Comment: `{result[2]}`\n" +
-                f"Beacon interval: `{result[4]}s`",
+                f"User ID: `{result.user_id}`\n" +
+                f"Callsign: `{result.user_callsign}`\n" + 
+                f"SSID: `{result.user_ssid}`\n" + 
+                f"APRS callsign: `{result.user_callsign}-{result.user_ssid}`\n" +
+                f"Comment: `{result.user_comment}`\n" +
+                f"Symbol: `{result.user_symbol}`\n" +
+                f"Beacon interval: `{result.user_interval}s`",
                 parse_mode='MarkdownV2')
         except Exception as ret_exc:
             app_logger.error(ret_exc)
@@ -241,27 +376,64 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # Parse the location and send it via APRS
 async def msg_location(update: Update, context: CallbackContext) -> None:
-    if is_user_approved(update.effective_sender.id):
-        line = sqlite_cursor.execute("SELECT user_id, user_callsign, user_comment, user_ssid FROM users WHERE user_id = ?", (update.effective_sender.id,)).fetchone()
-        app_logger.debug(f"Configuration query returned: [{line}], len: [{len(line)}]")
-        if line is not None and len(line) == 4:
-            if update.message.location is not None:
-                try:
-                    send_position(line[1], line[3], update.message.location.latitude, update.message.location.longitude, line[2])
-                    await update.message.reply_text(
-                        f'Position was sent:\n\nLatitude: `{update.message.location.latitude}`\n' + 
-                        f'Longitude: `{update.message.location.longitude}`\n' +
-                        r'Map link\: https\:\/\/aprs\.fi\/\#\!call\=a\%2F' + str(line[1]) + r'\-' + str(line[3]) + r'\&timerange\=3600\&tail\=3600',
-                        parse_mode='MarkdownV2')
-                except Exception as ret_exc:
-                    app_logger.error(ret_exc)
-                    await update.message.reply_text(f'An error occurred while sending the APRS location, please try again')
-            else:
-                await update.message.reply_text(f'Cannot read location from the message, please try again')
-        else:
-            await update.message.reply_text(f'Some configuration field is invalid or missing, please check instructions')
+    if not is_user_approved(update.effective_sender.id):
+        await telegram_app.bot.sendMessage(update.effective_sender.id, UNAUTHORIZED_MESSAGE)
+        return
+        
+    if update.effective_message.location.live_period:
+        # Handle live location
+        await handle_live_location(update, context)
     else:
-        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+        # Handle regular location (existing code)
+        aprs_parameters = load_aprs_parameters_for_user(update.effective_user.id)
+        if aprs_parameters is not None and update.message is not None:
+            try:
+                send_position(aprs_parameters, update.effective_message.location.latitude, update.effective_message.location.longitude)
+                await update.effective_message.reply_text(
+                    f'Position was sent:\n\nLatitude: `{update.effective_message.location.latitude}`\n' + 
+                    f'Longitude: `{update.effective_message.location.longitude}`\n' +
+                    r'Map link\: https\:\/\/aprs\.fi\/\#\!call\=a\%2F' + aprs_parameters.user_callsign + r'\-' + aprs_parameters.user_ssid + r'\&timerange\=3600\&tail\=3600',
+                    parse_mode='MarkdownV2'
+                )
+            except Exception as ret_exc:
+                app_logger.error(ret_exc)
+                await update.message.reply_text('An error occurred while sending the APRS location, please try again')
+        else:
+            if update.message is not None:
+                await update.message.reply_text('Some configuration field is invalid or missing, please check instructions')
+            else:
+                app_logger.warning("Cannot reply to message, it was probably deleted")
+        
+        try:
+            deleted_tracker = await stop_live_tracking(update.effective_user.id)
+            if deleted_tracker:
+                await send_to_user("Beaconing was stopped", update.effective_user.id)
+        except Exception as ret_exc:
+            app_logger.info(f"No trackers were enabled for user {update.effective_user.id}, error: {ret_exc}")
+
+# Load parameters from DB
+def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
+    try:
+        line = sqlite_cursor.execute(
+                "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_symbol, aprs_interval FROM users WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+    except Exception as ret_exc:
+        app_logger.error(f"Cannot load user data from database, error: {ret_exc}")
+        return None
+
+    if line is not None and len(line) == 6:
+        return AprsParameters(
+            user_id=line[0],
+            user_callsign=line[1],
+            user_comment=line[2],
+            user_ssid=line[3],
+            user_symbol=line[4],
+            user_interval=line[5]
+        )
+    else:
+        app_logger.warn("Database returned an unexpected result length for this query")
+        return None
 
 # Send the help message
 async def cmd_help(update: Update, context: CallbackContext) -> None:
@@ -272,7 +444,8 @@ async def cmd_help(update: Update, context: CallbackContext) -> None:
         r"Once your account is enabled, you can start configure the APRS parameters as follows:" + "\n" +
         r"`/setcall AA0BBB` to set your callsign to AA0BBB" + "\n" +
         r"`/setssid 9` to set your APRS SSID to 9 \(default value for mobile stations\)" + "\n" +
-        r"`/setmsg Sent from a Telegram APRS bot` to set the APRS message to be sent" + "\n\n" +
+        r"`/setinterval 120` to set the minimum beaconing interval to 120s" + "\n" +
+        r"`/setmsg Hello` to set the APRS message to be sent" + "\n\n" +
         r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
         r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server"
     , parse_mode='MarkdownV2')
@@ -397,7 +570,7 @@ def decimal_to_aprs(latitude, longitude):
     return lat_aprs, lon_aprs
 
 # Send the APRS position
-def send_position(callsign: str, ssid: str, latitude: float, longitude: float, comment: str, symbol: str = "$/") -> None:
+def send_position(aprs_details: AprsParameters, latitude: float, longitude: float) -> None:
     global app_logger
     global aprs_socket
     global aprs_socket_busy
@@ -439,9 +612,9 @@ def send_position(callsign: str, ssid: str, latitude: float, longitude: float, c
 
         # Create the APRS position report
         message = {
-            'from': f"{callsign}-{ssid}",
+            'from': f"{aprs_details.user_callsign}-{aprs_details.user_ssid}",
             'to': 'APRS',
-            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{symbol}{comment}",
+            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.user_symbol}{aprs_details.user_comment}",
             'path': f'APRS,TCPIP*,qAC,{aprs_user}'  # Digipeater path
         }
 
@@ -479,7 +652,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sqlite_cursor.execute("UPDATE users SET approved = True WHERE user_id = ? ", (target_user,))
             sqlite_connection.commit()
             await update.message.reply_text(f"User `{target_user}` was approved", parse_mode='MarkdownV2')
-            await send_to_user(r"Hurray\! Your account was activated\!", target_user)
+            await send_to_user("Hurray! Your account was activated!", target_user)
         else:
             app_logger.info(f"User: [{target_user}] will be disapproved")
             sqlite_cursor.execute("UPDATE users SET approved = False WHERE user_id = ? ", (target_user,))
@@ -487,6 +660,33 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"User `{target_user}` was disapproved", parse_mode='MarkdownV2')
     else:
         app_logger.warning(f"User [{update.effective_user.id}] is not an administrator")
+
+# Get new location and update
+async def update_live_location(update: Update, context: CallbackContext) -> None:
+    """Update stored location for a user"""
+    user_id = update.effective_user.id
+    context.user_data[f"live_location_{user_id}"] = update.message.location
+
+# Check if some beacons have to be removed
+async def stop_old_beacons() -> None:
+    """Stop all beacons older than the sharing time"""
+    while True:
+        try:
+            current_time = datetime.now(UTC)
+            for beacon in list(active_sessions.values()):  # Create a copy of values to avoid runtime modification issues
+                if current_time > beacon.end_sharing:
+                    # Use the existing stop_live_tracking function to properly clean up the session
+                    await stop_live_tracking(beacon.user_id)
+                    await telegram_app.bot.sendMessage(chat_id=beacon.user_id, text=
+                        f"Live location sharing ended",
+                        parse_mode='MarkdownV2'
+                    )
+                    app_logger.info(f"Automatically stopped expired beacon for user {beacon.user_id}")
+
+        except Exception as ret_exc:
+            app_logger.error(f"Cannot stop beaconing for user, error: {ret_exc}")
+        finally:
+            await asyncio.sleep(59)  # Using asyncio.sleep instead of time.sleep for async compatibility
 
 # Start polling of the bot
 def start_telegram_polling() -> None:
@@ -500,21 +700,53 @@ def start_telegram_polling() -> None:
     telegram_app.add_handler(CommandHandler("approve", cmd_approve))
     telegram_app.add_handler(CommandHandler("setmsg", cmd_setmsg))
     telegram_app.add_handler(CommandHandler("setssid", cmd_setssid))
+    telegram_app.add_handler(CommandHandler("setinterval", cmd_setinterval))
     telegram_app.add_handler(CommandHandler("printcfg", cmd_printcfg))
     telegram_app.add_handler(CommandHandler("help", cmd_help))
+    # Handle single location message
     telegram_app.add_handler(MessageHandler(filters.LOCATION, msg_location))
-    app_logger.info("Starting polling")
+    # Add handler for location updates
+    telegram_app.add_handler(MessageHandler(
+        filters.UpdateType.MESSAGE & filters.LOCATION,
+        lambda u, c: asyncio.create_task(update_live_location(u, c))
+    ))
+    # Start Telegram bot
+    app_logger.info("Starting Telegram APIs polling")
     telegram_app.run_polling()
+    # End live location sharing
+    asyncio.create_task(stop_old_beacons())
+
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escape special characters for Telegram MarkdownV2 format.
+    Characters that need escaping: '_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'
+    
+    Args:
+        text (str): The text to escape
+        
+    Returns:
+        str: The escaped text safe for MarkdownV2
+    """
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    escaped_text = ''
+    
+    for char in text:
+        if char in special_chars:
+            escaped_text += f'\\{char}'
+        else:
+            escaped_text += char
+            
+    return escaped_text
 
 # Send message to administrator
 async def send_to_admin(message: str) -> None:
     global telegram_app
-    await telegram_app.bot.sendMessage(chat_id=get_admin_id(), text=message, parse_mode='MarkdownV2')
+    await telegram_app.bot.sendMessage(chat_id=get_admin_id(), text=escape_markdown_v2(message), parse_mode='MarkdownV2')
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
     global telegram_app
-    await telegram_app.bot.sendMessage(chat_id=target, text=message, parse_mode='MarkdownV2')
+    await telegram_app.bot.sendMessage(chat_id=target, text=escape_markdown_v2(message), parse_mode='MarkdownV2')
 
 if __name__ == "__main__":
     initialize_logger()
