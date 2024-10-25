@@ -1111,7 +1111,8 @@ def send_position(aprs_details: UserParameters, latitude: float, longitude: floa
         message = {
             'from': f"{aprs_details.aprs_callsign}-{aprs_details.aprs_ssid}",
             'to': 'APRS',
-            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.aprs_comment}",
+            'msg': f"={aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.aprs_comment}",
+            #'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.aprs_comment}", <- Creates issues with timestamp
             'path': f'APRS,TCPIP*,qAC,{aprs_user}'  # Digipeater path
         }
 
