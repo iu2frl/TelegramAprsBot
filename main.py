@@ -306,7 +306,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     sqlite_cursor.execute("SELECT user_id, registration_date, approved FROM users WHERE user_id = ?", (update.effective_sender.id,))
     query_result = sqlite_cursor.fetchall()
@@ -375,7 +375,7 @@ async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
         # Check if the callsign was provided
@@ -432,7 +432,7 @@ async def cmd_setmsg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
         # Check if the message was provided
@@ -477,7 +477,7 @@ async def cmd_setssid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
         # Check if the message was provided
@@ -522,7 +522,7 @@ async def cmd_seticon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
         # Check if the message was provided
@@ -567,7 +567,7 @@ async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     global sqlite_cursor
     global sqlite_connection
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
     if is_user_approved(update.effective_sender.id):
         # Check if the message was provided
@@ -614,7 +614,7 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     global sqlite_connection
 
     # Register new users to the application
-    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
     app_logger.debug(f"Message: [{update}]")
 
     if is_user_approved(update.effective_sender.id):
