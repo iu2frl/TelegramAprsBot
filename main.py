@@ -248,7 +248,12 @@ def adapt_datetime(dt):
 
 # Datetime handler for sqlite3
 def convert_datetime(s):
-    return datetime.fromisoformat(s)
+    if isinstance(s, str):
+        return datetime.fromisoformat(s)
+    # Handle bytes case which can occur when reading from SQLite
+    if isinstance(s, bytes):
+        return datetime.fromisoformat(s.decode())
+    raise ValueError(f"Cannot convert {type(s)} to datetime")
 
 # Connect to the local SQLite file
 def connect_to_sqlite() -> None:
@@ -1203,7 +1208,10 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=first_message.id, text=f"Found {len(id_list)} users")
             for user in id_list:
                 user_data = load_aprs_parameters_for_user(user[0])
-                await update.message.reply_text(f"User id: `{user_data.user_id}`\nCallsign: `{user_data.aprs_callsign}`\nComment: `{user_data.aprs_comment}`\nUsername: {user_data.username}\nRegistration date: `{datetime_print(user_data.registration_date)} UTC`", parse_mode='MarkdownV2')
+                if user_data is not None:
+                    await update.message.reply_text(f"User id: `{user_data.user_id}`\nCallsign: `{user_data.aprs_callsign}`\nComment: `{user_data.aprs_comment}`\nUsername: {user_data.username}\nRegistration date: `{datetime_print(user_data.registration_date)} UTC`", parse_mode='MarkdownV2')
+                else:
+                    await update.message.reply_text(f"Cannot load data for user id `{user[0]}`", parse_mode='MarkdownV2')
         else:
             await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=first_message.id, text="No users were found")
     else:
