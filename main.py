@@ -1,5 +1,14 @@
 """
-Python bot to operate APRS from Telegram
+Python Telegram bot that interfaces with APRS-IS to send position reports and track user locations.
+Allows users to configure their APRS parameters and share their location either as one-time positions
+or continuous live tracking updates.
+
+Features:
+- User registration and admin approval system
+- APRS parameter configuration (callsign, SSID, message, update interval)
+- One-time position sharing
+- Live location tracking with configurable intervals
+- SQLite database for user data persistence
 """
 
 import os
@@ -39,6 +48,19 @@ telegram_app = None
 
 @dataclass
 class LiveLocationSession:
+    """
+    Represents an active live location sharing session.
+    
+    Attributes:
+        user_id (int): Telegram user ID of the session owner
+        chat_id (int): Telegram chat ID where the session was started
+        callsign (str): User's amateur radio callsign
+        ssid (str): APRS SSID for the user
+        comment (str): APRS comment/status text
+        next_update (datetime): When the next position update should be sent
+        end_sharing (datetime): When the live sharing session should end
+        start_message (int): ID of the message that started the session
+    """
     user_id: int
     chat_id: int
     callsign: str
@@ -50,11 +72,22 @@ class LiveLocationSession:
 
 @dataclass
 class AprsParameters:
+    """
+    Contains APRS configuration parameters for a user.
+    
+    Attributes:
+        user_id (int): Telegram user ID
+        user_callsign (str): Amateur radio callsign
+        user_comment (str): APRS comment/status text
+        user_ssid (str): APRS SSID
+        aprs_icon (str): APRS icon code
+        user_interval (int): Minimum interval between position updates in seconds
+    """
     user_id: int
     user_callsign: str
     user_comment: str
     user_ssid: str
-    user_symbol: str
+    aprs_icon: str
     user_interval: int
 
 # Global dictionary to store active live location sessions
@@ -62,7 +95,19 @@ active_sessions: Dict[int, LiveLocationSession] = {}
 
 # Live location was sent
 async def handle_live_location(update: Update, context: CallbackContext) -> None:
-    """Handle incoming live location updates"""
+    """
+    Process incoming live location updates from Telegram users.
+    
+    Creates or updates a live location tracking session for the user.
+    Sends position updates to APRS-IS based on configured intervals.
+    
+    Args:
+        update (Update): The Telegram update containing location data
+        context (CallbackContext): The Telegram context
+        
+    Returns:
+        None
+    """
     global telegram_app
     new_session = True
 
@@ -122,7 +167,15 @@ async def handle_live_location(update: Update, context: CallbackContext) -> None
 
 # Stop the process
 async def stop_live_tracking(user_id: int) -> bool:
-    """Stop live location tracking for a user"""
+    """
+    Stop live location tracking for a specific user.
+    
+    Args:
+        user_id (int): Telegram user ID to stop tracking
+        
+    Returns:
+        bool: True if tracking was stopped, False if no active tracking found
+    """
     # If there's an existing session for this user, cancel it
     deleted_tracker = False
     for beacon in list(active_sessions.values()):  # Create a copy of values to avoid runtime modification issues
@@ -137,6 +190,12 @@ async def stop_live_tracking(user_id: int) -> bool:
 
 # Initialize logger
 def initialize_logger() -> None:
+    """
+    Initialize the application logger with file and console handlers.
+    
+    Creates a rotating file handler that keeps backup log files and
+    adds both file and console output handlers to the logger.
+    """
     # Global logger object
     global app_logger
     # Check if log foler exists
@@ -167,6 +226,12 @@ def initialize_logger() -> None:
 
 # Connect to the local SQLite file
 def connect_to_sqlite() -> None:
+    """
+    Initialize SQLite database connection and create required tables.
+    
+    Creates database directory if it doesn't exist and initializes
+    the users table with required columns for APRS configuration.
+    """
     global sqlite_cursor
     global app_logger
     global sqlite_connection
@@ -183,6 +248,7 @@ def connect_to_sqlite() -> None:
     sqlite_cursor = sqlite_connection.cursor()
     # Initialize tables
     app_logger.info("Initializing database tables")
+    # Create the table if it doesn't exist
     sqlite_cursor.execute(
         "CREATE TABLE IF NOT EXISTS users (" +
             "user_name TEXT DEFAULT \"\", " +
@@ -193,12 +259,49 @@ def connect_to_sqlite() -> None:
             "user_comment TEXT DEFAULT \"IU2FRL Telegram APRS bot\", " + 
             "user_ssid TEXT DEFAULT \"9\", " + 
             "aprs_interval INTEGER DEFAULT 30, " +
-            "aprs_symbol TEXT DEFAULT \"$/\""
-            ")")
+            "aprs_icon TEXT DEFAULT \"$/\"" +
+        ")"
+    )
+    sqlite_connection.commit()
+
+    # Add or modify columns if they don't exist
+    columns_to_add = [
+        ("user_name", "TEXT DEFAULT \"\""),
+        ("user_id", "INTEGER NOT NULL"),
+        ("registration_date", "DATETIME NOT NULL"),
+        ("approved", "BOOL DEFAULT False"),
+        ("user_callsign", "TEXT DEFAULT \"\""),
+        ("user_comment", "TEXT DEFAULT \"IU2FRL Telegram APRS bot\""),
+        ("user_ssid", "TEXT DEFAULT \"9\""),
+        ("aprs_interval", "INTEGER DEFAULT 30"),
+        ("aprs_icon", "TEXT DEFAULT \"$/\"")
+    ]
+
+    for column_name, column_definition in columns_to_add:
+        try:
+            sqlite_cursor.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_definition}")
+            app_logger.info(f"Updating column {column_name}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e):
+                app_logger.info(f"Column {column_name} already exists")
+                pass  # Column already exists, no need to add
+            else:
+                raise
+
     sqlite_connection.commit()
 
 # Starts a conversation with the user
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /start command to register new users or check registration status.
+    
+    Args:
+        update (Update): The Telegram update containing the command
+        context (ContextTypes.DEFAULT_TYPE): The Telegram context
+        
+    Returns:
+        None
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -238,6 +341,36 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # Sets the callsign for the user
 async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Sets or updates a user's amateur radio callsign in the database.
+
+    This command handler processes the /setcall command, validates the provided
+    callsign, and updates it in the database for approved users. The command
+    expects the format '/setcall CALLSIGN' where CALLSIGN is a valid amateur
+    radio callsign.
+
+    Args:
+        update (Update): The update object containing message and user information
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback
+
+    Returns:
+        None
+
+    Notes:
+        - Only approved users (verified via is_user_approved()) can use this command
+        - Callsigns are automatically converted to uppercase
+        - The command requires exactly one argument (the callsign)
+        - Callsigns are validated through validate_callsign() before being accepted
+        - Updates are logged using app_logger at various severity levels
+        - Database updates are performed using global sqlite cursor and connection
+
+    Example:
+        User input: /setcall W1AW
+        Bot response: "Callsign was updated to W1AW"
+
+    Raises:
+        No explicit exceptions, but may raise database errors during execution
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -252,19 +385,49 @@ async def cmd_setcall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         # Clean the string and check validity
         clean_message = str(update.effective_message.text).replace("/setcall ", "").strip().split(" ")[0].upper()
-        if validate_callsign(clean_message):
-            app_logger.info(f"User: [{update._effective_sender.username}] updated callsign to: [{clean_message}]")
-            sqlite_cursor.execute("UPDATE users SET user_callsign = ? WHERE user_id = ? ", (clean_message, update.effective_sender.id))
+        try:
+            call = validate_callsign(clean_message)
+            app_logger.info(f"User: [{update._effective_sender.username}] updated callsign to: [{call}]")
+            sqlite_cursor.execute("UPDATE users SET user_callsign = ? WHERE user_id = ? ", (call, update.effective_sender.id))
             sqlite_connection.commit()
-            await update.message.reply_text(f"Callsign was updated to `{clean_message}`", parse_mode='MarkdownV2')
-        else:
+            await update.message.reply_text(f"Callsign was updated to `{call}`", parse_mode='MarkdownV2')
+        except:
             app_logger.warning(f"User: [{update._effective_sender.username}] tried to update callsign to: [{clean_message}] which is invalid")
-            await update.message.reply_text(f"The requested callsign `{clean_message}` could not be recognized as valid callsign", parse_mode='MarkdownV2')
+            await update.message.reply_text(f"The requested callsign `{clean_message}` could not be recognized as valid callsign, please remove all subfixes and prefixes and try again", parse_mode='MarkdownV2')
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
 
 # Sets the message for the user
 async def cmd_setmsg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Sets or updates a user's custom message in the database.
+
+    This command handler processes the /setmsg command and updates the user's 
+    custom message in the database for approved users. The command expects
+    the format '/setmsg MESSAGE' where MESSAGE is any non-empty text string.
+
+    Args:
+        update (Update): The update object containing message and user information
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback
+
+    Returns:
+        None
+
+    Notes:
+        - Only approved users (verified via is_user_approved()) can use this command
+        - The message must be non-empty after stripping whitespace
+        - Leading/trailing whitespace is automatically removed
+        - Updates are logged using app_logger at various severity levels
+        - Database updates are performed using global sqlite cursor and connection
+        - The command requires at least one word for the message
+
+    Example:
+        User input: /setmsg Hello from Seattle!
+        Bot response: "Message was updated to Hello from Seattle!"
+
+    Raises:
+        No explicit exceptions, but may raise database errors during execution
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -292,6 +455,24 @@ async def cmd_setmsg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 # Sets the message for the user
 async def cmd_setssid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Sets the SSID (Service Set Identifier) for the user.
+
+    This function handles the `/setssid` command, allowing approved users to set their SSID.
+    It performs the following steps:
+    1. Logs the entry into the method and the sender's ID.
+    2. Checks if the user is approved.
+    3. Validates the provided SSID argument.
+    4. Updates the SSID in the database if valid.
+    5. Sends appropriate response messages to the user.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -317,8 +498,71 @@ async def cmd_setssid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         await update.message.reply_text(UNAUTHORIZED_MESSAGE)
 
+# Sets the APRS map icon for the user
+async def cmd_seticon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Sets the icon for the user.
+
+    This function handles the `/seticon` command, allowing approved users to set their icon.
+    It performs the following steps:
+    1. Logs the entry into the method and the sender's ID.
+    2. Checks if the user is approved.
+    3. Validates the provided icon argument.
+    4. Updates the icon in the database if valid.
+    5. Sends appropriate response messages to the user.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
+    """
+    global app_logger
+    global sqlite_cursor
+    global sqlite_connection
+    # Register new users to the application
+    app_logger.info(f"Entering method. Effective sender id: [{update.effective_sender.id}]")
+    app_logger.debug(f"Message: [{update}]")
+    if is_user_approved(update.effective_sender.id):
+        # Check if the message was provided
+        if len(update.effective_message.text.split(" ")) != 2:
+            app_logger.warning(f"Invalid icon received [{update.effective_message.text}]")
+            await update.message.reply_text(r"Cannot detect icon argument, syntax is: `/seticon XX`", parse_mode='MarkdownV2')
+            return
+        # Clean the string and check validity
+        clean_message = str(update.effective_message.text).replace("/seticon ", "").strip().upper()
+        if len(clean_message) == 2:
+            app_logger.info(f"User: [{update._effective_sender.username}] updated icon to: [{clean_message}]")
+            sqlite_cursor.execute("UPDATE users SET aprs_icon = ? WHERE user_id = ? ", (clean_message, update.effective_sender.id))
+            sqlite_connection.commit()
+            await update.message.reply_text(f"Icon was updated to `{clean_message}`", parse_mode='MarkdownV2')
+        else:
+            app_logger.warning(f"User: [{update._effective_sender.username}] tried to update icon to: [{clean_message}] which is invalid")
+            await update.message.reply_text(f"The requested icon `{clean_message}` could not processed, length must be 2 characters", parse_mode='MarkdownV2')
+    else:
+        await update.message.reply_text(UNAUTHORIZED_MESSAGE)
+
 # Sets the update interval for the user
 async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Sets the update interval for the user.
+
+    This function handles the `/setinterval` command, allowing approved users to set their update interval.
+    It performs the following steps:
+    1. Logs the entry into the method and the sender's ID.
+    2. Checks if the user is approved.
+    3. Validates the provided interval argument.
+    4. Updates the interval in the database if valid.
+    5. Sends appropriate response messages to the user.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -347,6 +591,24 @@ async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # Sets the message for the user
 async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Prints the current configuration for the user.
+
+    This function handles the `/printcfg` command, allowing approved users to view their current configuration.
+    It performs the following steps:
+    1. Logs the entry into the method and the sender's ID.
+    2. Checks if the user is approved.
+    3. Retrieves the user's configuration from the database.
+    4. Sends the configuration details to the user.
+    5. Handles any errors that occur during the process.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
+    """
     global app_logger
     global sqlite_cursor
     global sqlite_connection
@@ -365,7 +627,7 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"SSID: `{result.user_ssid}`\n" + 
                 f"APRS callsign: `{result.user_callsign}-{result.user_ssid}`\n" +
                 f"Comment: `{result.user_comment}`\n" +
-                f"Symbol: `{result.user_symbol}`\n" +
+                f"Icon: `{result.aprs_icon}`\n" +
                 f"Beacon interval: `{result.user_interval}s`",
                 parse_mode='MarkdownV2')
         except Exception as ret_exc:
@@ -376,6 +638,27 @@ async def cmd_printcfg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # Parse the location and send it via APRS
 async def msg_location(update: Update, context: CallbackContext) -> None:
+    """
+    Handles the user's location message.
+
+    This function processes the `/msg_location` command, allowing approved users to send their location.
+    It performs the following steps:
+    1. Checks if the user is approved.
+    2. Determines if the location is live or regular.
+    3. Handles live location updates.
+    4. Processes regular location updates.
+    5. Sends the location to the APRS system.
+    6. Stops live tracking if applicable.
+    7. Sends appropriate response messages to the user.
+    8. Handles any errors that occur during the process.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (CallbackContext): The context object for the callback.
+
+    Returns:
+        None
+    """
     if not is_user_approved(update.effective_sender.id):
         await telegram_app.bot.sendMessage(update.effective_sender.id, UNAUTHORIZED_MESSAGE)
         return
@@ -413,9 +696,26 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
 
 # Load parameters from DB
 def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
+    """
+    Loads APRS parameters for a given user from the database.
+
+    This function retrieves the APRS (Automatic Packet Reporting System) parameters for a user based on their user ID.
+    It performs the following steps:
+    1. Executes a SQL query to fetch the user's parameters from the database.
+    2. Handles any exceptions that occur during the database query.
+    3. Checks if the query returned the expected result.
+    4. Constructs and returns an AprsParameters object if the data is valid.
+    5. Logs a warning if the query result is unexpected.
+
+    Args:
+        user_id (int): The ID of the user whose parameters are to be loaded.
+
+    Returns:
+        AprsParameters: An object containing the user's APRS parameters, or None if an error occurs or the data is invalid.
+    """
     try:
         line = sqlite_cursor.execute(
-                "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_symbol, aprs_interval FROM users WHERE user_id = ?",
+                "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_icon, aprs_interval FROM users WHERE user_id = ?",
                 (user_id,)
             ).fetchone()
     except Exception as ret_exc:
@@ -428,7 +728,7 @@ def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
             user_callsign=line[1],
             user_comment=line[2],
             user_ssid=line[3],
-            user_symbol=line[4],
+            aprs_icon=line[4],
             user_interval=line[5]
         )
     else:
@@ -437,6 +737,16 @@ def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
 
 # Send the help message
 async def cmd_help(update: Update, context: CallbackContext) -> None:
+    """
+    Prints the instructions for all users
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (CallbackContext): The context object for the callback.
+
+    Returns:
+        None
+    """
     await update.message.reply_text(
         r"Here are the instructions for the APRS bot, there are few simple steps to configure it" + "\n\n" +
         r"First you need to start the communication with the bot using the command `/start`, this will add you to the database\." + "\n" +
@@ -452,6 +762,20 @@ async def cmd_help(update: Update, context: CallbackContext) -> None:
 
 # Check if user is approved
 def is_user_approved(user_id: int) -> bool:
+    """
+    Checks if a user is approved.
+
+    This function verifies whether a user with the given user ID is approved by querying the database.
+    It performs the following steps:
+    1. Executes a SQL query to check if the user is approved.
+    2. Returns True if the user is approved, otherwise returns False.
+
+    Args:
+        user_id (int): The ID of the user to check.
+
+    Returns:
+        bool: True if the user is approved, False otherwise.
+    """
     global sqlite_cursor
     sqlite_cursor.execute("SELECT user_id FROM users WHERE user_id = ? AND approved = True", (user_id,))
     if len(sqlite_cursor.fetchall()) > 0:
@@ -461,6 +785,21 @@ def is_user_approved(user_id: int) -> bool:
 
 # Format the datetime to something we can print as message
 def datetime_print(input_date: any, markdown: bool = True) -> str:
+    """
+    Formats a given date into a string.
+
+    This function converts a date input into a formatted string. If the input is a string, it parses it into a datetime object.
+    It performs the following steps:
+    1. Checks if the input date is a string and parses it if necessary.
+    2. Formats the date into a string, with optional Markdown escaping.
+
+    Args:
+        input_date (any): The date to format, either as a string or a datetime object.
+        markdown (bool): Whether to format the string with Markdown escaping. Defaults to True.
+
+    Returns:
+        str: The formatted date string.
+    """
     if type(input_date) == str:
         input_date = parser.parse(input_date)
 
@@ -472,10 +811,18 @@ def datetime_print(input_date: any, markdown: bool = True) -> str:
 # Load the bot token from environment variables
 def load_bot_token() -> str:
     """
-    Loads the BOT token from local environment
+    Loads the bot token from environment variables.
+
+    This function retrieves the bot token from the local environment variables.
+    It performs the following steps:
+    1. Attempts to load the bot token from the environment variable `BOT_TOKEN`.
+    2. Logs an error and raises an exception if the token is not found.
 
     Returns:
-        str: Token of the bot
+        str: The bot token.
+
+    Raises:
+        Exception: If the `BOT_TOKEN` environment variable is not found.
     """
     global app_logger
     bot_token = os.environ.get("BOT_TOKEN", None)
@@ -485,18 +832,49 @@ def load_bot_token() -> str:
         app_logger.error(f"Cannot load environment variables")
         raise Exception("Cannot load BOT_TOKEN variable")
 
-# Identify the callsign in the given string
-def validate_callsign(input_call: str) -> bool:
+# Check if callsign is valid by removing prefixes and suffixes
+def validate_callsign(input_call: str) -> str:
+    """
+    Identifies and validates the callsign in the given string.
+
+    This function splits the input string by '/' and selects the longest segment as the callsign.
+    It then checks if this segment is a valid callsign. If valid, it returns the callsign; otherwise, it raises an exception.
+
+    Args:
+        input_call (str): The input string containing the callsign.
+
+    Returns:
+        str: The validated callsign.
+
+    Raises:
+        Exception: If the identified callsign is not valid.
+    """
     global app_logger
     split_call = input_call.split("/")
     app_logger.debug(f'Split call: [{split_call}]')
     # Callsign is normally the longest one
     call = max(split_call, key = len)
     app_logger.debug(f'Longest record: [{call}]')
-    return is_callsign(call)
+    if is_callsign(call):
+        return call
+    else:
+        app_logger.warning(f"The callsign [{call}] does not appear to be valid")
+        raise Exception("Invalid callsign")
 
-# Check if the given string matches any callsign
+# Use regex to validate callsign
 def is_callsign(input_call: str) -> bool:
+    """
+    Checks if the given string matches any callsign pattern.
+
+    This function uses regular expressions to validate if the input string matches the pattern for amateur radio call signs.
+    It supports both US and non-US call signs.
+
+    Args:
+        input_call (str): The input string to check.
+
+    Returns:
+        bool: True if the input string is a valid callsign, False otherwise.
+    """
     #  All amateur radio call signs:
     # [a-zA-Z0-9]{1,3}[0-9][a-zA-Z0-9]{0,3}[a-zA-Z]
     # Non-US call signs:
@@ -509,6 +887,22 @@ def is_callsign(input_call: str) -> bool:
 
 # Check if user is the administrator of the application
 def is_admin(user_id: int) -> bool:
+    """
+    Checks if a user is an admin.
+
+    This function verifies whether a user with the given user ID is an admin by comparing it with the admin ID.
+    It performs the following steps:
+    1. Retrieves the admin ID.
+    2. Logs the check process.
+    3. Compares the user ID with the admin ID.
+    4. Returns True if the user ID matches the admin ID, otherwise returns False.
+
+    Args:
+        user_id (int): The ID of the user to check.
+
+    Returns:
+        bool: True if the user is an admin, False otherwise.
+    """
     global app_logger
 
     admin_id = get_admin_id()
@@ -522,6 +916,19 @@ def is_admin(user_id: int) -> bool:
 
 # Get the administrator ID
 def get_admin_id() -> int:
+    """
+    Retrieves the admin ID from environment variables.
+
+    This function attempts to load the admin ID from the environment variable `BOT_ADMIN`.
+    It performs the following steps:
+    1. Retrieves the `BOT_ADMIN` environment variable.
+    2. Logs an error and returns -1 if the variable is not found.
+    3. Converts the variable to an integer and returns it.
+    4. Handles any exceptions during the conversion, logs the error, and returns -1.
+
+    Returns:
+        int: The admin ID if successfully retrieved and converted, otherwise -1.
+    """
     bot_token = os.environ.get("BOT_ADMIN", None)
 
     if bot_token is None:
@@ -540,6 +947,19 @@ def get_aprs_is() -> str:
 
 # Get the APRS port
 def get_aprs_port() -> int:
+    """
+    Retrieves the APRS port from environment variables.
+
+    This function attempts to load the APRS port from the environment variable `APRS_PORT`.
+    It performs the following steps:
+    1. Retrieves the `APRS_PORT` environment variable.
+    2. Returns the default port 14580 if the variable is not found.
+    3. Converts the variable to an integer and returns it.
+    4. Handles any exceptions during the conversion, logs the error, and returns the default port 14580.
+
+    Returns:
+        int: The APRS port if successfully retrieved and converted, otherwise 14580.
+    """
     port = os.environ.get("APRS_PORT", None)
 
     if port is None:
@@ -553,6 +973,22 @@ def get_aprs_port() -> int:
 
 # Convert the coordinates to APRS format
 def decimal_to_aprs(latitude, longitude):
+    """
+    Converts decimal latitude and longitude to APRS format.
+
+    This function converts latitude and longitude from decimal degrees to the APRS (Automatic Packet Reporting System) position format.
+    It performs the following steps:
+    1. Converts latitude to degrees, minutes, and direction (N/S).
+    2. Converts longitude to degrees, minutes, and direction (E/W).
+    3. Formats the latitude and longitude into the APRS position format (DDMM.MM[N/S] and DDDMM.MM[E/W]).
+
+    Args:
+        latitude (float): The latitude in decimal degrees.
+        longitude (float): The longitude in decimal degrees.
+
+    Returns:
+        tuple: A tuple containing the formatted latitude and longitude strings in APRS format.
+    """
     # Latitude conversion
     lat_deg = int(abs(latitude))  # Degrees
     lat_min = (abs(latitude) - lat_deg) * 60  # Minutes
@@ -571,6 +1007,28 @@ def decimal_to_aprs(latitude, longitude):
 
 # Send the APRS position
 def send_position(aprs_details: AprsParameters, latitude: float, longitude: float) -> None:
+    """
+    Sends the user's position to the APRS-IS network.
+
+    This function handles the process of sending a position report to the APRS-IS (Automatic Packet Reporting System - Internet Service) network.
+    It performs the following steps:
+    1. Waits if the APRS socket is busy.
+    2. Connects to the APRS-IS server if not already connected.
+    3. Converts the latitude and longitude to APRS format.
+    4. Creates and sends the APRS position report.
+    5. Handles any exceptions that occur during the process.
+
+    Args:
+        aprs_details (AprsParameters): The APRS parameters for the user.
+        latitude (float): The latitude of the position to send.
+        longitude (float): The longitude of the position to send.
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If the APRS packet cannot be sent.
+    """
     global app_logger
     global aprs_socket
     global aprs_socket_busy
@@ -614,7 +1072,7 @@ def send_position(aprs_details: AprsParameters, latitude: float, longitude: floa
         message = {
             'from': f"{aprs_details.user_callsign}-{aprs_details.user_ssid}",
             'to': 'APRS',
-            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.user_symbol}{aprs_details.user_comment}",
+            'msg': f"@{timestamp}{aprs_lat}/{aprs_lon}{aprs_details.aprs_icon}{aprs_details.user_comment}",
             'path': f'APRS,TCPIP*,qAC,{aprs_user}'  # Digipeater path
         }
 
@@ -631,10 +1089,29 @@ def send_position(aprs_details: AprsParameters, latitude: float, longitude: floa
 
 # APRS callback
 def aprs_callback(aprs_packet):
-    print(aprs_packet)
+    raise NotImplementedError()
 
 # Approve new user
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Approves or disapproves a user based on the command.
+
+    This function handles the `/approve` command, allowing an admin to approve or disapprove a user.
+    It performs the following steps:
+    1. Checks if the command sender is an admin.
+    2. Validates the command format and extracts the target user ID.
+    3. Approves the user if they are not already approved.
+    4. Disapproves the user if they are already approved.
+    5. Sends appropriate response messages to the admin and the target user.
+    6. Logs the process and handles any exceptions.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (ContextTypes.DEFAULT_TYPE): The context object for the callback.
+
+    Returns:
+        None
+    """
     global app_logger
     if is_admin(update.effective_user.id):
         if len(str(update.effective_message.text).split(" ")) != 2:
@@ -663,13 +1140,37 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # Get new location and update
 async def update_live_location(update: Update, context: CallbackContext) -> None:
-    """Update stored location for a user"""
+    """
+    Update stored location for a user.
+
+    This function updates the stored live location for a user in the context's user data.
+
+    Args:
+        update (Update): The update object containing the message and user information.
+        context (CallbackContext): The context object for the callback.
+
+    Returns:
+        None
+    """
     user_id = update.effective_user.id
     context.user_data[f"live_location_{user_id}"] = update.message.location
 
 # Check if some beacons have to be removed
 async def stop_old_beacons() -> None:
-    """Stop all beacons older than the sharing time"""
+    """
+    Stop all beacons older than the sharing time.
+
+    This function continuously checks for and stops any active beacons that have exceeded their sharing time.
+    It performs the following steps:
+    1. Retrieves the current time.
+    2. Iterates through active sessions to find expired beacons.
+    3. Stops the live tracking for expired beacons and notifies the user.
+    4. Logs the process and handles any exceptions.
+    5. Sleeps for 59 seconds before repeating the check.
+
+    Returns:
+        None
+    """
     while True:
         try:
             current_time = datetime.now(UTC)
@@ -690,10 +1191,28 @@ async def stop_old_beacons() -> None:
 
 # Start polling of the bot
 def start_telegram_polling() -> None:
+    """
+    Starts the Telegram bot polling.
+
+    This function initializes and starts the Telegram bot, setting up command and message handlers.
+    It performs the following steps:
+    1. Loads the bot token from environment variables.
+    2. Builds the Telegram application.
+    3. Creates command handlers for various bot commands.
+    4. Adds handlers for location messages and updates.
+    5. Starts polling the Telegram APIs.
+    6. Initiates the task to stop old beacons.
+
+    Returns:
+        None
+    """
+
     global app_logger
     global telegram_app
+
     app_logger.info("Loading token from environment and building application")
     telegram_app = ApplicationBuilder().token(load_bot_token()).build()
+
     app_logger.info("Creating command handlers")
     telegram_app.add_handler(CommandHandler("start", cmd_start))
     telegram_app.add_handler(CommandHandler("setcall", cmd_setcall))
@@ -701,6 +1220,7 @@ def start_telegram_polling() -> None:
     telegram_app.add_handler(CommandHandler("setmsg", cmd_setmsg))
     telegram_app.add_handler(CommandHandler("setssid", cmd_setssid))
     telegram_app.add_handler(CommandHandler("setinterval", cmd_setinterval))
+    telegram_app.add_handler(CommandHandler("seticon", cmd_seticon))
     telegram_app.add_handler(CommandHandler("printcfg", cmd_printcfg))
     telegram_app.add_handler(CommandHandler("help", cmd_help))
     # Handle single location message
@@ -710,6 +1230,7 @@ def start_telegram_polling() -> None:
         filters.UpdateType.MESSAGE & filters.LOCATION,
         lambda u, c: asyncio.create_task(update_live_location(u, c))
     ))
+
     # Start Telegram bot
     app_logger.info("Starting Telegram APIs polling")
     telegram_app.run_polling()
@@ -740,11 +1261,34 @@ def escape_markdown_v2(text: str) -> str:
 
 # Send message to administrator
 async def send_to_admin(message: str) -> None:
+    """
+    Sends a message to the administrator.
+
+    This function sends a message to the admin's chat ID using the Telegram bot.
+
+    Args:
+        message (str): The message to send.
+
+    Returns:
+        None
+    """
     global telegram_app
     await telegram_app.bot.sendMessage(chat_id=get_admin_id(), text=escape_markdown_v2(message), parse_mode='MarkdownV2')
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
+    """
+    Sends a message to a specific user.
+
+    This function sends a message to a specified chat ID using the Telegram bot.
+
+    Args:
+        message (str): The message to send.
+        target (int): The chat ID of the target user.
+
+    Returns:
+        None
+    """
     global telegram_app
     await telegram_app.bot.sendMessage(chat_id=target, text=escape_markdown_v2(message), parse_mode='MarkdownV2')
 

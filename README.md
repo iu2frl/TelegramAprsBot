@@ -1,6 +1,6 @@
 # APRS Telegram Bot
 
-A Python bot that allows users to send their location to APRS (Automatic Packet Reporting System) through Telegram. Users can share their location via Telegram, and the bot will automatically format and forward it to the APRS-IS network.
+A Python bot that allows users to send their location to APRS (Automatic Packet Reporting System) through Telegram. Users can share their location (live location is supported too!) via Telegram, and the bot will automatically format and forward it to the APRS-IS network.
 
 ## Features
 
@@ -62,6 +62,8 @@ python main.py
    - Set callsign: `/setcall AA0BBB`
    - Set SSID (default is 9): `/setssid 9`
    - Set message: `/setmsg Sent from Telegram APRS bot`
+   - Set minimum interval: `/setinterval 30`
+   - Set icon: `/seticon $/`
    - Verify settings: `/printcfg`
 
 4. Send Location:
@@ -74,6 +76,8 @@ python main.py
 - `/setcall <callsign>` - Set your amateur radio callsign
 - `/setssid <ssid>` - Set your APRS SSID (default: 9)
 - `/setmsg <message>` - Set your APRS comment/message
+- `/setinterval <interval>` - Set the minimum delay between packets
+- `/seticon <icon>` - Set your APRS icon
 - `/printcfg` - Display current configuration
 - `/help` - Show help message
 - `/approve <user_id>` - (Admin only) Approve a user
