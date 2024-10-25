@@ -242,6 +242,14 @@ def initialize_logger() -> None:
     consoleHandler.setFormatter(log_formatter)
     app_logger.addHandler(consoleHandler)
 
+# Datetime handler for sqlite3
+def adapt_datetime(dt):
+    return dt.isoformat()
+
+# Datetime handler for sqlite3
+def convert_datetime(s):
+    return datetime.fromisoformat(s)
+
 # Connect to the local SQLite file
 def connect_to_sqlite() -> None:
     """
@@ -260,7 +268,12 @@ def connect_to_sqlite() -> None:
         os.makedirs("db")
     # Open the database object
     app_logger.info("Opening connection to database file")
-    sqlite_connection = sqlite3.connect("db/database.sqlite")
+    sqlite3.register_adapter(datetime, adapt_datetime)
+    sqlite3.register_converter("datetime", convert_datetime)
+    sqlite_connection = sqlite3.connect(
+        "db/database.sqlite",
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+        )
     # Get a cursor to write queries
     app_logger.info("Creating connection cursor")
     sqlite_cursor = sqlite_connection.cursor()
