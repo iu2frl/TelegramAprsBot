@@ -71,7 +71,7 @@ class LiveLocationSession:
     start_message: int
 
 @dataclass
-class AprsParameters:
+class UserParameters:
     """
     Contains APRS configuration parameters for a user.
     
@@ -82,6 +82,8 @@ class AprsParameters:
         user_ssid (str): APRS SSID
         aprs_icon (str): APRS icon code
         user_interval (int): Minimum interval between position updates in seconds
+        username (text): The Telegram username
+        registration_date (datetime): The first login to the app
     """
     user_id: int
     aprs_callsign: str
@@ -89,6 +91,8 @@ class AprsParameters:
     aprs_ssid: str
     aprs_icon: str
     update_interval: int
+    username: str
+    registration_date: datetime
 
 # Global dictionary to store active live location sessions
 active_sessions: Dict[int, LiveLocationSession] = {}
@@ -695,7 +699,7 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
             app_logger.info(f"No trackers were enabled for user {update.effective_user.id}, error: {ret_exc}")
 
 # Load parameters from DB
-def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
+def load_aprs_parameters_for_user(user_id: int) -> UserParameters:
     """
     Loads APRS parameters for a given user from the database.
 
@@ -715,21 +719,23 @@ def load_aprs_parameters_for_user(user_id: int) -> AprsParameters:
     """
     try:
         line = sqlite_cursor.execute(
-                "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_icon, aprs_interval FROM users WHERE user_id = ?",
+                "SELECT user_id, user_callsign, user_comment, user_ssid, aprs_icon, aprs_interval, registration_date, user_name FROM users WHERE user_id = ?",
                 (user_id,)
             ).fetchone()
     except Exception as ret_exc:
         app_logger.error(f"Cannot load user data from database, error: {ret_exc}")
         return None
 
-    if line is not None and len(line) == 6:
-        return AprsParameters(
+    if line is not None and len(line) == 8:
+        return UserParameters(
             user_id=line[0],
             aprs_callsign=line[1],
             aprs_comment=line[2],
             aprs_ssid=line[3],
             aprs_icon=line[4],
-            update_interval=line[5]
+            update_interval=line[5],
+            registration_date=line[6],
+            username=line[7]
         )
     else:
         app_logger.warn("Database returned an unexpected result length for this query")
@@ -1007,7 +1013,7 @@ def decimal_to_aprs(latitude, longitude):
     return lat_aprs, lon_aprs
 
 # Send the APRS position
-def send_position(aprs_details: AprsParameters, latitude: float, longitude: float) -> None:
+def send_position(aprs_details: UserParameters, latitude: float, longitude: float) -> None:
     """
     Sends the user's position to the APRS-IS network.
 
@@ -1139,6 +1145,26 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         app_logger.warning(f"User [{update.effective_user.id}] is not an administrator")
 
+# Lists all users
+async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    
+    """
+    global app_logger
+    if is_admin(update.effective_user.id):
+        global sqlite_cursor
+        message_id = await update.message.reply_text(f"Fetching users list, please wait", parse_mode='MarkdownV2')
+        id_list = sqlite_cursor.execute("SELECT user_id FROM users WHERE True").fetchall()
+        if len(id_list) > 0:
+            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=message_id.id, text=f"Found {len(id_list)} users")
+            for user in id_list:
+                user_data = load_aprs_parameters_for_user(user[0])
+                await update.message.reply_text(f"User id: `{user_data.user_id}`\nCallsign: `{user_data.aprs_callsign}`\nComment: `{user_data.aprs_comment}`\nUsername: {user_data.username}\nRegistration date: `{datetime_print(user_data.registration_date)} UTC`", parse_mode='MarkdownV2')
+        else:
+            await telegram_app.bot.edit_message_text(chat_id=update.effective_user.id, message_id=message_id.id, text="No users were found")
+    else:
+        app_logger.warning(f"User [{update.effective_user.id}] is not an administrator")
+
 # Get new location and update
 async def update_live_location(update: Update, context: CallbackContext) -> None:
     """
@@ -1215,15 +1241,18 @@ def start_telegram_polling() -> None:
     telegram_app = ApplicationBuilder().token(load_bot_token()).build()
 
     app_logger.info("Creating command handlers")
+    # User commands
     telegram_app.add_handler(CommandHandler("start", cmd_start))
     telegram_app.add_handler(CommandHandler("setcall", cmd_setcall))
-    telegram_app.add_handler(CommandHandler("approve", cmd_approve))
     telegram_app.add_handler(CommandHandler("setmsg", cmd_setmsg))
     telegram_app.add_handler(CommandHandler("setssid", cmd_setssid))
     telegram_app.add_handler(CommandHandler("setinterval", cmd_setinterval))
     telegram_app.add_handler(CommandHandler("seticon", cmd_seticon))
     telegram_app.add_handler(CommandHandler("printcfg", cmd_printcfg))
     telegram_app.add_handler(CommandHandler("help", cmd_help))
+    # Admin commands
+    telegram_app.add_handler(CommandHandler("approve", cmd_approve))
+    telegram_app.add_handler(CommandHandler("listusers", cmd_listusers))
     # Handle single location message
     telegram_app.add_handler(MessageHandler(filters.LOCATION, msg_location))
     # Add handler for location updates
@@ -1238,6 +1267,7 @@ def start_telegram_polling() -> None:
     # End live location sharing
     asyncio.create_task(stop_old_beacons())
 
+# Escape all reserved characters
 def escape_markdown_v2(text: str) -> str:
     """
     Escape special characters for Telegram MarkdownV2 format.
