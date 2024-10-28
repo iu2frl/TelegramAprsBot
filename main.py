@@ -820,7 +820,7 @@ async def cmd_help(update: Update, context: CallbackContext) -> None:
             r"`/setinterval 120` to set the minimum beaconing interval to 120s" + "\n" +
             r"`/setmsg Hello` to set the APRS message to be sent" + "\n\n" +
             r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
-            r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server\. You can also share a live position to enable automatic beaconing."
+            r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server\. You can also share a live position to enable automatic beaconing\."
         , parse_mode='MarkdownV2')
     except Exception as ret_exc:
         app_logger.error(ret_exc)
