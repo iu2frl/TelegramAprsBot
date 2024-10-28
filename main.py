@@ -94,6 +94,25 @@ class UserParameters:
     username: str
     registration_date: datetime
 
+class CustomLogHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno in (logging.WARNING, logging.ERROR):
+            self.forward_to_method(record)
+
+    def forward_to_method(self, record):
+        try:
+            # Replace this with your custom method
+            message = f"Received: `{record.levelname}`\n\nError:\n```{str(record)}```"
+            # Call the async method in a synchronous way
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:  # No event loop is running
+                asyncio.run(send_to_admin(message))
+            else:
+                loop.create_task(send_to_admin(message))
+        except Exception as ret_exc:
+            print(f"Cannot forward message to Telegram admin, error: {ret_exc}")
+
 # Global dictionary to store active live location sessions
 active_sessions: Dict[int, LiveLocationSession] = {}
 
@@ -241,6 +260,10 @@ def initialize_logger() -> None:
     consoleHandler = logging.StreamHandler(stdout)
     consoleHandler.setFormatter(log_formatter)
     app_logger.addHandler(consoleHandler)
+    # Add the custom handler to forward warning and errors
+    custom_handler = CustomLogHandler()
+    custom_handler.setFormatter(log_formatter)
+    app_logger.addHandler(custom_handler)
 
 # Datetime handler for sqlite3
 def adapt_datetime(dt):
@@ -785,19 +808,22 @@ async def cmd_help(update: Update, context: CallbackContext) -> None:
     Returns:
         None
     """
-    await update.message.reply_text(
-        r"Here are the instructions for the APRS bot, there are few simple steps to configure it" + "\n\n" +
-        r"First you need to start the communication with the bot using the command `/start`, this will add you to the database\." + "\n" +
-        r"The same `/start` command can also be used to check if your account was enabled by an administrator, this is a manual process and may take some time\." + "\n\n" +
-        r"Once your account is enabled, you can start configure the APRS parameters as follows:" + "\n" +
-        r"`/setcall AA0BBB` to set your callsign to AA0BBB" + "\n" +
-        r"`/setssid 9` to set your APRS SSID to 9 \(default value for mobile stations\)" + "\n" +
-        r"`/seticon $/` to set your APRS icon to a phone icon" + "\n" +
-        r"`/setinterval 120` to set the minimum beaconing interval to 120s" + "\n" +
-        r"`/setmsg Hello` to set the APRS message to be sent" + "\n\n" +
-        r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
-        r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server\. You can also share a live position to enable automatic beaconing."
-    , parse_mode='MarkdownV2')
+    try:
+        await update.message.reply_text(
+            r"Here are the instructions for the APRS bot, there are few simple steps to configure it" + "\n\n" +
+            r"First you need to start the communication with the bot using the command `/start`, this will add you to the database\." + "\n" +
+            r"The same `/start` command can also be used to check if your account was enabled by an administrator, this is a manual process and may take some time\." + "\n\n" +
+            r"Once your account is enabled, you can start configure the APRS parameters as follows:" + "\n" +
+            r"`/setcall AA0BBB` to set your callsign to AA0BBB" + "\n" +
+            r"`/setssid 9` to set your APRS SSID to 9 \(default value for mobile stations\)" + "\n" +
+            r"`/seticon $/` to set your APRS icon to a phone icon" + "\n" +
+            r"`/setinterval 120` to set the minimum beaconing interval to 120s" + "\n" +
+            r"`/setmsg Hello` to set the APRS message to be sent" + "\n\n" +
+            r"`/printcfg` can be used to validate the APRS parameters, make sure to use it before sending any position" + "\n\n" +
+            r"Once everything is setup, you can just send your position and this will be sent to the APRS\-IS server\. You can also share a live position to enable automatic beaconing."
+        , parse_mode='MarkdownV2')
+    except Exception as ret_exc:
+        app_logger.error(ret_exc)
 
 # Check if user is approved
 def is_user_approved(user_id: int) -> bool:
@@ -1357,7 +1383,10 @@ async def send_to_admin(message: str) -> None:
         None
     """
     global telegram_app
-    await telegram_app.bot.sendMessage(chat_id=get_admin_id(), text=escape_markdown_v2(message), parse_mode='MarkdownV2')
+    try:
+        await telegram_app.bot.sendMessage(chat_id=get_admin_id(), text=escape_markdown_v2(message), parse_mode='MarkdownV2')
+    except Exception as ret_exc:
+        app_logger.error(ret_exc)
 
 # Send message to chat id
 async def send_to_user(message: str, target: int) -> None:
@@ -1374,7 +1403,10 @@ async def send_to_user(message: str, target: int) -> None:
         None
     """
     global telegram_app
-    await telegram_app.bot.sendMessage(chat_id=target, text=escape_markdown_v2(message), parse_mode='MarkdownV2')
+    try:
+        await telegram_app.bot.sendMessage(chat_id=target, text=escape_markdown_v2(message), parse_mode='MarkdownV2')
+    except Exception as ret_exc:
+        app_logger.error(ret_exc)
 
 if __name__ == "__main__":
     initialize_logger()
