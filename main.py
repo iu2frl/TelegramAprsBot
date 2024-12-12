@@ -1317,7 +1317,7 @@ def start_telegram_polling() -> None:
     global telegram_app
 
     app_logger.info("Loading token from environment and building application")
-    telegram_app = ApplicationBuilder().token(load_bot_token()).build()
+    telegram_app = ApplicationBuilder().token(load_bot_token()).concurrent_updates(True).build()
 
     app_logger.info("Creating command handlers")
     # User commands
