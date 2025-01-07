@@ -101,15 +101,16 @@ class CustomLogHandler(logging.Handler):
 
     def forward_to_method(self, record):
         try:
-            # Replace this with your custom method
-            message = f"Received: `{record.levelname}`\n\nError:\n```{str(record)}```"
-            # Call the async method in a synchronous way
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:  # No event loop is running
-                asyncio.run(send_to_admin(message))
-            else:
-                loop.create_task(send_to_admin(message))
+            if record.levelname == "ERROR":
+                # Format message to send to admin
+                message = f"Received: `{record.levelname}`\n\nError:\n```{str(record)}```"
+                # Call the async method in a synchronous way
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:  # No event loop is running
+                    asyncio.run(send_to_admin(message))
+                else:
+                    loop.create_task(send_to_admin(message))
         except Exception as ret_exc:
             print(f"Cannot forward message to Telegram admin, error: {ret_exc}")
 
@@ -744,7 +745,7 @@ async def msg_location(update: Update, context: CallbackContext) -> None:
             if update.message is not None:
                 await update.message.reply_text('Some configuration field is invalid or missing, please check instructions')
             else:
-                app_logger.warning("Cannot reply to message, it was probably deleted")
+                await send_to_user('Some configuration field is invalid or missing, please check instructions', update.effective_user.id)
         
         try:
             deleted_tracker = await stop_live_tracking(update.effective_user.id)
@@ -976,7 +977,7 @@ def is_admin(user_id: int) -> bool:
     if admin_id == user_id:
         return True
     else:
-        app_logger.error(f"Cannot load environment variables")
+        app_logger.warning(f"User [{user_id}] is not admin")
         return False
 
 # Get the administrator ID
@@ -1148,7 +1149,7 @@ def send_position(aprs_details: UserParameters, latitude: float, longitude: floa
         aprs_socket.sendall(aprs_packet)
         app_logger.info(f"Package was sent succesfully")
     except Exception as ret_exc:
-        app_logger.error(ret_exc)
+        app_logger.warning(ret_exc)
         raise Exception("Cannot send APRS packet")
     finally:
         aprs_socket_busy = False
